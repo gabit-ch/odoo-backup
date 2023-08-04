@@ -1,7 +1,7 @@
 # odoo-backup
 
 ## What is odoo-backup?
-odoo-backup is a stateless docker service that creates rotating backups of odoo and uploads them to any sFTP server. The image is based on python alpine and was coded to use minimal resources.
+odoo-backup is a stateless docker service that creates rotating backups of odoo and uploads them to any SFTP server. The image is based on python alpine and was coded to use minimal resources.
 
 ## Main features
 - Stateless backup service for odoo databases
