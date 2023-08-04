@@ -27,12 +27,18 @@ odoo-backup is a stateless docker service that creates rotating backups of odoo 
 * ```TZ``` **optional, set timezone, default="UTC"
 * ```BACKUP_TIME``` **optional, start time for backup or time which daily backup should be preserved, default="02:00"
 * ```BACKUP_EVERY_HOUR``` **optional, set hours between the backups if hourly backup should be done, default=None
+* ```HOURLY_BACKUP_KEEP``` **optional, set count of hourly backups to keep (total hours = BACKUP_EVERY_HOUR * HOURLY_BACKUP_KEEP), default=4
 * ```DAILY_BACKUP_KEEP``` **optional, set count of daily backups to keep, default=30
 * ```MONTHLY_BACKUP_KEEP``` **optional, set count of monthly backups to keep, default=12
 * ```YEARLY_BACKUP_KEEP``` **optional, set count of yearly backups to keep (unlimited=-1), default=-1
 * ```TEST_MODE``` **optional, set TEST_MODE=True to directly execute backup without scheduling
 
 ## Releases
+### 1.0.1
+* Add HOURLY_BACKUP_KEEP as a new environment variable
+* Add docstrings to script, class and methods
+* Fix cleanup process with remaining backups
+
 ### 1.0.0
 First relaese with all base functions and environment variables
 
