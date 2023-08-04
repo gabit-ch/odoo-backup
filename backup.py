@@ -1,6 +1,24 @@
 # Maintainer: GABIT Marco Gantenbein
 # Licence: GPLv3
 
+"""This script sets up and manages the scheduling of the backup function depending on the mode the script is running in.
+
+If the script is running in TEST_MODE, it logs that it is running in this mode and directly executes the backup
+function.
+
+If the script is set to make hourly or daily backups, it schedules the backup job for the times of the
+day specified in the backup_times list. Exceptions during scheduling are logged and do not interrupt the script.
+
+If the script is not set to make backups every hour, it will schedule a daily backup for the time set in BACKUP_TIME.
+Exceptions during scheduling are logged and do not interrupt the script.
+
+During scheduled operation (not in TEST_MODE), the script runs in an infinite loop. In each iteration of the loop,
+the script sleeps until the next scheduled job, executes any pending scheduled jobs, and handles errors.
+
+Keyboard interrupts are caught and used to exit the loop, logging a relevant message.
+Other exceptions are logged and don't interrupt the script.
+"""
+
 import logging
 import os
 import re
@@ -28,7 +46,7 @@ CNOPTS = pysftp.CnOpts()
 CNOPTS.hostkeys = None
 
 
-def get_env_or_default(key, default=None, converter=str):
+def get_env_or_default(key, converter, default=None):
     value = get_env(key)
     if not value:
         return default if default is not None else converter()
@@ -39,19 +57,20 @@ def get_env_or_default(key, default=None, converter=str):
 URL = get_env('ODOO_URL')
 MASTER_PWD = get_env('ODOO_MASTER_PWD')
 NAME = get_env('ODOO_DB_NAME')
-FORMAT = get_env_or_default('ODOO_BACKUP_FORMAT', default="zip").lower()
-BACKUP_TIME = get_env_or_default('BACKUP_TIME', default="02:00")
-BACKUP_EVERY_HOUR = get_env_or_default('BACKUP_EVERY_HOUR', default=None, converter=int)
-DAILY_BACKUP_KEEP = get_env_or_default('DAILY_BACKUP_KEEP', default=30, converter=int)
-MONTHLY_BACKUP_KEEP = get_env_or_default('MONTHLY_BACKUP_KEEP', default=12, converter=int)
-YEARLY_BACKUP_KEEP = get_env_or_default('YEARLY_BACKUP_KEEP', default=-1, converter=int)
+FORMAT = get_env_or_default('ODOO_BACKUP_FORMAT', converter=str, default="zip").lower()
+BACKUP_TIME = get_env_or_default('BACKUP_TIME', converter=str, default="02:00")
+BACKUP_EVERY_HOUR = get_env_or_default('BACKUP_EVERY_HOUR', converter=int)
+HOURLY_BACKUP_KEEP = get_env_or_default('HOURLY_BACKUP_KEEP', converter=int, default=4)
+DAILY_BACKUP_KEEP = get_env_or_default('DAILY_BACKUP_KEEP', converter=int, default=30)
+MONTHLY_BACKUP_KEEP = get_env_or_default('MONTHLY_BACKUP_KEEP', converter=int, default=12)
+YEARLY_BACKUP_KEEP = get_env_or_default('YEARLY_BACKUP_KEEP', converter=int, default=-1)
 SFTP_HOST = get_env('SFTP_HOST')
-SFTP_PORT = get_env_or_default('SFTP_PORT', default=22, converter=int)
+SFTP_PORT = get_env_or_default('SFTP_PORT', converter=int, default=22)
 SFTP_USER = get_env('SFTP_USER')
 SFTP_PASSWORD = get_env('SFTP_PASSWORD')
-SFTP_PATH = get_env_or_default('SFTP_PATH', default="/")
+SFTP_PATH = get_env_or_default('SFTP_PATH', converter=str, default="/")
 TEST_MODE = get_env('TEST_MODE')
-TIME_ZONE = get_env_or_default('TZ', default='UTC')
+TIME_ZONE = get_env_or_default('TZ', converter=str, default='UTC')
 
 try:
     TZ = timezone(TIME_ZONE)
@@ -60,6 +79,26 @@ except UnknownTimeZoneError:
 
 
 class SFTPHandler:
+    """This class encapsulates actions that can be performed on an SFTP server.
+
+    The SFTPHandler class has methods for uploading and removing files, listing files in a directory, and closing the
+    connection.
+    Upon initialization, it uses pysftp to create a connection to an SFTP server using provided SFTP hostname, port,
+    username, and password.
+
+    Attributes:
+        sftp: a pysftp connection object
+
+    Methods:
+        - upload(file_path: str, file_name: str)
+          Uploads a file to the SFTP server
+        - remove(file: str)
+          Removes a file from the SFTP server
+        - list_files()
+          Returns a list of all files in a specific path on the SFTP server
+        - close()
+          Closes the connection with the SFTP server
+    """
     def __init__(self):
         cnopts = pysftp.CnOpts()
         cnopts.hostkeys = None
@@ -67,25 +106,69 @@ class SFTPHandler:
                                       cnopts=cnopts)
 
     def upload(self, file_path, file_name):
+        """Uploads a file to the SFTP server.
+
+        :param file_path: str
+            The path to the file on the local system which needs to be uploaded.
+        :param file_name: str
+            The name that the uploaded file should have on the SFTP server.
+        :return: None
+        """
         self.sftp.put(file_path, os.path.join(SFTP_PATH, file_name))
 
     def remove(self, file):
+        """Removes a file from the SFTP server.
+
+        :param file: str
+            The name of the file on the SFTP server that should be deleted.
+        :return: None
+        """
         self.sftp.remove(os.path.join(SFTP_PATH, file))
 
     def list_files(self):
+        """Lists all files in a specific directory on the SFTP server.
+
+        :return: list
+            Returns a list of filenames in the SFTP directory.
+        """
         return self.sftp.listdir(SFTP_PATH)
 
     def close(self):
+        """Closes the connection with the SFTP server.
+
+        :return: None
+        """
         self.sftp.close()
 
 
 def backup():
+    """This method is responsible for creating a backup of an Odoo database, uploading the backup to an SFTP server,
+    and managing old backups in the SFTP server.
+
+    It checks if all necessary parameters are set (URL, MASTER_PWD, NAME, FORMAT, SFTP_HOST, SFTP_USER, SFTP_PASSWORD).
+    If all parameters are set, it creates a connection to the Odoo server and starts the backup process.
+
+    First, it creates a .zip or .dump backup of the Odoo database to a local file.
+    The name of the backup file contains server version, database name, and the timestamp of when the backup started.
+
+    Then, it uploads the backup file to the SFTP server.
+
+    After the upload, it checks the SFTP server for old backups. If any old backups are found, these are removed from
+    the SFTP server.
+
+    If an exception occurs during the backup process, the method will log the exception and exit gracefully.
+
+    :raises xmlrpc.client.ProtocolError: If a protocol error occurs while contacting the Odoo server.
+    :raises xmlrpc.client.Fault: If a fault error occurs while contacting the Odoo server.
+    :raises pysftp.exceptions.ConnectionException: If a connection error occurs while contacting the SFTP server.
+    """
     try:
         if (URL and MASTER_PWD and NAME and FORMAT.lower() in ["zip", "dump"] and
                 SFTP_HOST and SFTP_USER and SFTP_PASSWORD):
             common = xmlrpc.client.ServerProxy(urljoin(URL, "/xmlrpc/2/common"))
             version = common.version()
-            logger.info(f'*** Starting backup process for odoo {version["server_serie"]} with database "{NAME}" on "{URL}" ***')
+            logger.info(f'*** Starting backup process for odoo {version["server_serie"]} '
+                        f'with database "{NAME}" on "{URL}" ***')
             handler = SFTPHandler()
             now = datetime.now(tz=TZ)
             backup_file_name = f"odoo{version['server_serie']}-{NAME}-{now.strftime('%Y%m%d-%H%M%S')}.{FORMAT.lower()}"
@@ -97,14 +180,17 @@ def backup():
             backups_to_remove = _backup_cleanup(handler, now)
             _remove_backups(handler, backups_to_remove)
             handler.close()
-            logger.info(f'*** Finished backup process for odoo {version["server_serie"]} with database "{NAME}" on "{URL}" ***')
+            logger.info(f'*** Finished backup process for odoo {version["server_serie"]} '
+                        f'with database "{NAME}" on "{URL}" ***')
         else:
             _backup_help()
     except (xmlrpc.client.ProtocolError, xmlrpc.client.Fault):
         logger.error(
-            'Error occurred during connection to odoo. Please check if odoo is reachable under the provided ODOO_URL.')
+            'Error occurred during connection to odoo.  \
+            Please check if odoo is reachable under the provided ODOO_URL.')
     except pysftp.exceptions.ConnectionException:
-        logger.exception('Exception occurred during connecting to sFTP Server. Please check provided sFTP Credentials')
+        logger.exception('Exception occurred during connecting to sFTP Server. \
+                         Please check provided sFTP Credentials')
     except Exception as e:
         logger.exception(f'Exception occurred during backup: {e}')
 
@@ -120,9 +206,9 @@ def _backup_request(backup_file_path):
         }
         response = requests.post(odoo_backup_url, data=data, stream=True)
         if response.status_code == 200:
-            with open(backup_file_path, "wb") as f:
+            with open(backup_file_path, "wb") as file:
                 for chunk in response.iter_content(chunk_size=1024):
-                    f.write(chunk)
+                    file.write(chunk)
         else:
             logger.error(f'Backup request failed. Status code: {response.status_code}')
     except requests.RequestException as e:
@@ -147,20 +233,24 @@ def _backup_cleanup(handler, now):
 
         if BACKUP_EVERY_HOUR:
             backup_time_to_keep = int(BACKUP_TIME.split(":")[0])
+            hours = HOURLY_BACKUP_KEEP * BACKUP_EVERY_HOUR
             backups_to_remove.extend(
-                filter(lambda x: x[0] < now - relativedelta(days=1) and x[0].hour != backup_time_to_keep, files)
+                filter(lambda x: x[0] <= now - relativedelta(hours=hours) and
+                                 x[0].hour != backup_time_to_keep, files)
             )
         backups_to_remove.extend(
-            filter(lambda x: x[0] < now - relativedelta(months=1) and x[0].day != 1, files)
+            filter(lambda x: x[0] <= now - relativedelta(days=DAILY_BACKUP_KEEP) and
+                             x[0].day != 1, files)
         )
 
         backups_to_remove.extend(
-            filter(lambda x: x[0] < now - relativedelta(years=1) and x[0].month != 1, files)
+            filter(lambda x: x[0] <= now - relativedelta(months=MONTHLY_BACKUP_KEEP) and
+                             x[0].month != 1, files)
         )
 
         if YEARLY_BACKUP_KEEP != -1:
             backups_to_remove.extend(
-                filter(lambda x: x[0] < now - relativedelta(years=YEARLY_BACKUP_KEEP), files)
+                filter(lambda x: x[0] <= now - relativedelta(years=YEARLY_BACKUP_KEEP), files)
             )
 
         return backups_to_remove
@@ -188,26 +278,26 @@ def _remove_backups(handler, backups_to_remove):
 
 def _backup_help():
     logger.info("""Usage Environment variables: [options...]
-***Required Environment variables***
-ODOO_URL, URL odoo server
-ODOO_MASTER_PWD, odoo Master password
-ODOO_DB_NAME, odoo Database name to backup
-SFTP_HOST,  sFTP Server Address
-SFTP_USER, sFTP Server User
-SFTP_PASSWORD, sFTP Server Password
-
-***Optional Environment variables***
-ODOO_BACKUP_FORMAT, Backup format  zip or dump, default=zip
-BACKUP_TIME, Start time for Backup or time which daily backup should be preserved, default="02:00"
-BACKUP_EVERY_HOUR, Set hours between the backups if hourly backup should be done, default=None
-DAILY_BACKUP_KEEP, Set count of daily backups to keep, default=30
-MONTHLY_BACKUP_KEEP, Set count of monthly backups to keep, default=12
-YEARLY_BACKUP_KEEP, Set count of yearly backups to keep (unlimited=-1), default=-1
-SFTP_PORT, Port of sFTP Server, default=22
-SFTP_PATH, Directory Path on sFTP Server, default="/"
-TEST_MODE, Set TEST_MODE=True to directly execute backup without scheduling
-TZ, Set timezone, default="UTC"
-""")
+    ***Required Environment variables***
+    ODOO_URL, URL odoo server
+    ODOO_MASTER_PWD, odoo Master password
+    ODOO_DB_NAME, odoo Database name to backup
+    SFTP_HOST,  sFTP Server Address
+    SFTP_USER, sFTP Server User
+    SFTP_PASSWORD, sFTP Server Password
+    
+    ***Optional Environment variables***
+    ODOO_BACKUP_FORMAT, Backup format  zip or dump, default=zip
+    BACKUP_TIME, Start time for Backup or time which daily backup should be preserved, default="02:00"
+    BACKUP_EVERY_HOUR, Set hours between the backups if hourly backup should be done, default=None
+    DAILY_BACKUP_KEEP, Set count of daily backups to keep, default=30
+    MONTHLY_BACKUP_KEEP, Set count of monthly backups to keep, default=12
+    YEARLY_BACKUP_KEEP, Set count of yearly backups to keep (unlimited=-1), default=-1
+    SFTP_PORT, Port of sFTP Server, default=22
+    SFTP_PATH, Directory Path on sFTP Server, default="/"
+    TEST_MODE, Set TEST_MODE=True to directly execute backup without scheduling
+    TZ, Set timezone, default="UTC"
+    """)
 
 
 def _get_backup_times():
