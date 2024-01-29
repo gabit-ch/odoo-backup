@@ -32,6 +32,7 @@ import pysftp
 import requests
 import schedule
 from dateutil.relativedelta import relativedelta
+from paramiko.ssh_exception import SSHException
 from pytz import timezone, UnknownTimeZoneError
 
 warnings.filterwarnings('ignore', '.*Failed to load HostKeys.*')
@@ -99,46 +100,97 @@ class SFTPHandler:
         - close()
           Closes the connection with the SFTP server
     """
+
     def __init__(self):
         cnopts = pysftp.CnOpts()
         cnopts.hostkeys = None
         self.sftp = pysftp.Connection(SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASSWORD,
                                       cnopts=cnopts)
 
-    def upload(self, file_path, file_name):
-        """Uploads a file to the SFTP server.
+    def reconnect(self):
+        """Reestablishes the SFTP connection.
 
+        This method first attempts to close any existing SFTP connection. If this
+        connection is already closed, it ignores any resulting exceptions. Then, it
+        opens a new SFTP connection.
+
+        This is useful in long-running applications, where the SFTP connection might
+        become inactive or closed, and need to be reestablished.
+
+        :return: None
+        """
+        try:
+            self.sftp.close()
+        except Exception:
+            pass
+        cnopts = pysftp.CnOpts()
+        self.sftp = pysftp.Connection(SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASSWORD,
+                                      cnopts=cnopts)
+
+    def upload(self, file_path, file_name, retries=3):
+        """Uploads a file to the SFTP server.
         :param file_path: str
             The path to the file on the local system which needs to be uploaded.
         :param file_name: str
             The name that the uploaded file should have on the SFTP server.
+        :param retries: int
+            The number of connection retries, if connection drops in between.
         :return: None
         """
-        self.sftp.put(file_path, os.path.join(SFTP_PATH, file_name))
+        for _ in range(retries):
+            try:
+                self.sftp.put(file_path, os.path.join(SFTP_PATH, file_name))
+                break  # if upload was successful, break out of the retry loop
+            except SSHException as e:
+                logger.error(f"SFTP session error: {str(e)}, Attempting to reconnect...")
+                self.reconnect()  # assuming you have defined a reconnect method
+        else:
+            logger.error(f'Failed to upload after {retries} retries.')
 
-    def remove(self, file):
+    def remove(self, file, retries=3):
         """Removes a file from the SFTP server.
 
         :param file: str
             The name of the file on the SFTP server that should be deleted.
+        :param retries: int
+            The number of connection retries, if connection drops in
         :return: None
         """
-        self.sftp.remove(os.path.join(SFTP_PATH, file))
+        for _ in range(retries):
+            try:
+                self.sftp.remove(os.path.join(SFTP_PATH, file))
+                break  # if upload was successful, break out of the retry loop
+            except SSHException as e:
+                logger.error(f"SFTP session error: {str(e)}, Attempting to reconnect...")
+                self.reconnect()  # assuming you have defined a reconnect method
+        else:
+            logger.error(f'Failed to upload after {retries} retries.')
 
-    def list_files(self):
+    def list_files(self, retries=3):
         """Lists all files in a specific directory on the SFTP server.
-
+        :param retries: int
+            The number of connection retries, if connection drops in
         :return: list
             Returns a list of filenames in the SFTP directory.
         """
-        return self.sftp.listdir(SFTP_PATH)
+        for _ in range(retries):
+            try:
+                return self.sftp.listdir(SFTP_PATH)
+            except SSHException as e:
+                logger.error(f"SFTP session error: {str(e)}, Attempting to reconnect...")
+                self.reconnect()  # assuming you have defined a reconnect method
+        else:
+            logger.error(f'Failed to upload after {retries} retries.')
 
     def close(self):
         """Closes the connection with the SFTP server.
 
         :return: None
         """
-        self.sftp.close()
+        try:
+            self.sftp.close()
+        except Exception:
+            pass
 
 
 def backup():
