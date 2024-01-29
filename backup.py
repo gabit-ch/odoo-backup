@@ -124,6 +124,7 @@ class SFTPHandler:
         except Exception:
             pass
         cnopts = pysftp.CnOpts()
+        cnopts.hostkeys = None
         self.sftp = pysftp.Connection(SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASSWORD,
                                       cnopts=cnopts)
 

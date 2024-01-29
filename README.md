@@ -34,6 +34,9 @@ odoo-backup is a stateless docker service that creates rotating backups of odoo 
 * ```TEST_MODE``` **optional, set TEST_MODE=True to directly execute backup without scheduling
 
 ## Releases
+### 1.0.3
+* Fix "No hostkey" error for reconnecting
+
 ### 1.0.2
 * Fix "SSH session not active" error for huge backups. Add reconnect method with 3 retries
 
