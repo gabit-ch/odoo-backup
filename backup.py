@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import time
+import threading
 import warnings
 import xmlrpc.client
 from datetime import datetime
@@ -329,6 +330,13 @@ def _remove_backups(handler, backups_to_remove):
         handler.remove(file[1])
 
 
+def threaded_backup():
+    # Wrap the backup function in a new thread
+    thread = threading.Thread(target=backup)
+    # Start the new thread
+    thread.start()
+
+
 def _backup_help():
     logger.info("""Usage Environment variables: [options...]
     ***Required Environment variables***
@@ -367,19 +375,19 @@ def _get_backup_times():
 
 if TEST_MODE:
     logger.info('Running backup in TEST_MODE.')
-    backup()
+    threaded_backup()
 elif BACKUP_EVERY_HOUR:
     backup_times = _get_backup_times()
     for backup_time in backup_times:
         try:
             logger.info(f'Scheduling hourly backup at {backup_time}')
-            schedule.every().day.at(backup_time, TZ).do(backup)
+            schedule.every().day.at(backup_time, TZ).do(threaded_backup)
         except Exception as exc:
             logger.exception(f'Exception occurred while scheduling hourly backup at {backup_time}: {exc}')
 else:
     try:
         logger.info(f'Scheduling daily backup at {BACKUP_TIME}.')
-        schedule.every().day.at(BACKUP_TIME, TZ).do(backup)
+        schedule.every().day.at(BACKUP_TIME, TZ).do(threaded_backup)
     except Exception as exc:
         logger.exception(f'Exception occurred while scheduling daily backup at {BACKUP_TIME}: {exc}')
 
