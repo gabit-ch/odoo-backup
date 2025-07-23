@@ -216,6 +216,8 @@ def backup():
     :raises xmlrpc.client.Fault: If a fault error occurs while contacting the Odoo server.
     :raises pysftp.exceptions.ConnectionException: If a connection error occurs while contacting the SFTP server.
     """
+    backup_file_path = None
+
     try:
         if (URL and MASTER_PWD and NAME and FORMAT.lower() in ["zip", "dump"] and
                 SFTP_HOST and SFTP_USER and SFTP_PASSWORD):
@@ -247,6 +249,11 @@ def backup():
                          Please check provided sFTP Credentials')
     except Exception as e:
         logger.exception(f'Exception occurred during backup: {e}')
+
+    finally:
+        if backup_file_path:
+            os.remove(backup_file_path)
+            logger.info(f'Deleted backup file: {backup_file_path}')
 
 
 def _backup_request(backup_file_path):
@@ -373,6 +380,29 @@ def _get_backup_times():
         logger.error('An error occurred while retrieving the backup times. BACKUP_EVERY_HOUR can not be 0.')
 
 
+def clean_local_backups_folder():
+    """
+    Cleans the specified local folder by removing all files and subdirectories.
+    """
+    try:
+        if os.path.exists('./backups'):
+            for file_name in os.listdir('./backups'):
+                file_path = os.path.join('./backups', file_name)
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)  # Remove file or symbolic link
+                    logger.info(f'Removed file: {file_path}')
+                elif os.path.isdir(file_path):
+                    # Remove subdirectories and their contents
+                    import shutil
+                    shutil.rmtree(file_path)
+                    logger.info(f'Removed directory: {file_path}')
+            logger.info('Cleaned up local folder: /backups')
+        else:
+            logger.info('Folder does not exist: ./backups')
+    except Exception as e:
+        logger.exception(f'Error occurred while cleaning folder ./backups: {e}')
+
+clean_local_backups_folder()
 if TEST_MODE:
     logger.info('Running backup in TEST_MODE.')
     threaded_backup()
