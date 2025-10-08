@@ -60,6 +60,7 @@ URL = get_env('ODOO_URL')
 MASTER_PWD = get_env('ODOO_MASTER_PWD')
 NAME = get_env('ODOO_DB_NAME')
 FORMAT = get_env_or_default('ODOO_BACKUP_FORMAT', converter=str, default="zip").lower()
+ALLOWED_FORMATS = ['zip', 'dump', 'tar', 'tar.gz', 'tar.bz2', 'tar.xz', 'tar.zst']
 BACKUP_TIME = get_env_or_default('BACKUP_TIME', converter=str, default="02:00")
 BACKUP_EVERY_HOUR = get_env_or_default('BACKUP_EVERY_HOUR', converter=int)
 HOURLY_BACKUP_KEEP = get_env_or_default('HOURLY_BACKUP_KEEP', converter=int, default=4)
@@ -219,7 +220,7 @@ def backup():
     backup_file_path = None
 
     try:
-        if (URL and MASTER_PWD and NAME and FORMAT.lower() in ["zip", "dump"] and
+        if (URL and MASTER_PWD and NAME and FORMAT.lower() in ALLOWED_FORMATS and
                 SFTP_HOST and SFTP_USER and SFTP_PASSWORD):
             common = xmlrpc.client.ServerProxy(urljoin(URL, "/xmlrpc/2/common"))
             version = common.version()
@@ -227,7 +228,7 @@ def backup():
                         f'with database "{NAME}" on "{URL}" ***')
             handler = SFTPHandler()
             now = datetime.now(tz=TZ)
-            backup_file_name = f"odoo{version['server_serie']}-{NAME}-{now.strftime('%Y%m%d-%H%M%S')}.{FORMAT.lower()}"
+            backup_file_name = f"odoo{version['server_serie']}-{NAME}-{now.strftime('%Y%m%d-%H%M%S')}.{FORMAT}"
             backup_file_path = os.path.join(
                 './backups', backup_file_name
             )
@@ -355,7 +356,7 @@ def _backup_help():
     SFTP_PASSWORD, sFTP Server Password
     
     ***Optional Environment variables***
-    ODOO_BACKUP_FORMAT, Backup format  zip or dump, default=zip
+    ODOO_BACKUP_FORMAT, Backup format  zip, dump or tar (additional module), default=zip
     BACKUP_TIME, Start time for Backup or time which daily backup should be preserved, default="02:00"
     BACKUP_EVERY_HOUR, Set hours between the backups if hourly backup should be done, default=None
     DAILY_BACKUP_KEEP, Set count of daily backups to keep, default=30
