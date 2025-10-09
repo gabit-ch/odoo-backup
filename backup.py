@@ -130,7 +130,7 @@ class SFTPHandler:
         self.sftp = pysftp.Connection(SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASSWORD,
                                       cnopts=cnopts)
 
-    def upload(self, file_path, file_name, retries=3):
+    def upload(self, file_path, file_name, retries=2):
         """Uploads a file to the SFTP server.
         :param file_path: str
             The path to the file on the local system which needs to be uploaded.
@@ -140,15 +140,31 @@ class SFTPHandler:
             The number of connection retries, if connection drops in between.
         :return: None
         """
-        for _ in range(retries):
+        temp_file_name = f"{file_name}.upload"
+        remote_temp_path = os.path.join(SFTP_PATH, temp_file_name)
+        remote_final_path = os.path.join(SFTP_PATH, file_name)
+
+        for attempt in range(1, retries + 1):
             try:
-                self.sftp.put(file_path, os.path.join(SFTP_PATH, file_name))
-                break  # if upload was successful, break out of the retry loop
+                logger.info(f"Uploading '{file_name}' (attempt {attempt}/{retries})...")
+                self.sftp.put(file_path, remote_temp_path)
+
+                # Rename after successful upload
+                self.sftp.rename(remote_temp_path, remote_final_path)
+                logger.info(f"Upload complete and renamed to '{file_name}'.")
+                break
+
             except SSHException as e:
-                logger.error(f"SFTP session error: {str(e)}, Attempting to reconnect...")
-                self.reconnect()  # assuming you have defined a reconnect method
+                logger.error(f"SFTP session error: {e}. Reconnecting (attempt {attempt})...")
+                self.reconnect()
+
+            except OSError as e:
+                # For quota exceeded or permission issues
+                logger.error(f"Upload failed due to OS error: {e}")
+                raise  # don’t silently ignore
+
         else:
-            logger.error(f'Failed to upload after {retries} retries.')
+            logger.error(f"Failed to upload '{file_name}' after {retries} attempts.")
 
     def remove(self, file, retries=3):
         """Removes a file from the SFTP server.
