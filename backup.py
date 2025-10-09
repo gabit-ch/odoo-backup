@@ -29,11 +29,11 @@ import xmlrpc.client
 from datetime import datetime
 from urllib.parse import urljoin
 
-import pysftp
+import paramiko
 import requests
 import schedule
 from dateutil.relativedelta import relativedelta
-from paramiko.ssh_exception import SSHException
+from paramiko.ssh_exception import SSHException, NoValidConnectionsError
 from pytz import timezone, UnknownTimeZoneError
 
 warnings.filterwarnings('ignore', '.*Failed to load HostKeys.*')
@@ -43,9 +43,6 @@ logger = logging.getLogger(__name__)
 
 ENV = os.environ
 get_env = ENV.get
-
-CNOPTS = pysftp.CnOpts()
-CNOPTS.hostkeys = None
 
 
 def get_env_or_default(key, converter, default=None):
@@ -104,10 +101,15 @@ class SFTPHandler:
     """
 
     def __init__(self):
-        cnopts = pysftp.CnOpts()
-        cnopts.hostkeys = None
-        self.sftp = pysftp.Connection(SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASSWORD,
-                                      cnopts=cnopts)
+        self.transport = None
+        self.sftp = None
+        self.connect()
+
+    def connect(self):
+        logger.info("Connecting to SFTP...")
+        self.transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+        self.transport.connect(username=SFTP_USER, password=SFTP_PASSWORD)
+        self.sftp = paramiko.SFTPClient.from_transport(self.transport)
 
     def reconnect(self):
         """Reestablishes the SFTP connection.
@@ -121,14 +123,9 @@ class SFTPHandler:
 
         :return: None
         """
-        try:
-            self.sftp.close()
-        except Exception:
-            pass
-        cnopts = pysftp.CnOpts()
-        cnopts.hostkeys = None
-        self.sftp = pysftp.Connection(SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASSWORD,
-                                      cnopts=cnopts)
+
+        self.close()
+        self.connect()
 
     def upload(self, file_path, file_name, retries=2):
         """Uploads a file to the SFTP server.
@@ -150,7 +147,11 @@ class SFTPHandler:
                 self.sftp.put(file_path, remote_temp_path)
 
                 # Rename after successful upload
-                self.sftp.rename(remote_temp_path, remote_final_path)
+                try:
+                    self.sftp.rename(remote_temp_path, remote_final_path)
+                except IOError as e:
+                    logger.error(f"Failed to rename '{remote_temp_path}' to '{remote_final_path}': {e}")
+
                 logger.info(f"Upload complete and renamed to '{file_name}'.")
                 break
 
@@ -206,11 +207,8 @@ class SFTPHandler:
 
         :return: None
         """
-        try:
-            self.sftp.close()
-        except Exception:
-            pass
-
+        if self.sftp: self.sftp.close()
+        if self.transport: self.transport.close()
 
 def backup():
     """This method is responsible for creating a backup of an Odoo database, uploading the backup to an SFTP server,
@@ -242,17 +240,21 @@ def backup():
             version = common.version()
             logger.info(f'*** Starting backup process for odoo {version["server_serie"]} '
                         f'with database "{NAME}" on "{URL}" ***')
-            handler = SFTPHandler()
             now = datetime.now(tz=TZ)
             backup_file_name = f"odoo{version['server_serie']}-{NAME}-{now.strftime('%Y%m%d-%H%M%S')}.{FORMAT}"
+            os.makedirs('./backups', exist_ok=True)
             backup_file_path = os.path.join(
                 './backups', backup_file_name
             )
             _backup_request(backup_file_path)
-            _backup_upload(handler, backup_file_path, backup_file_name)
-            backups_to_remove = _backup_cleanup(handler, now)
-            _remove_backups(handler, backups_to_remove)
-            handler.close()
+
+            handler = SFTPHandler()
+            try:
+                _backup_upload(handler, backup_file_path, backup_file_name)
+                backups_to_remove = _backup_cleanup(handler, now)
+                _remove_backups(handler, backups_to_remove)
+            finally:
+                handler.close()
             logger.info(f'*** Finished backup process for odoo {version["server_serie"]} '
                         f'with database "{NAME}" on "{URL}" ***')
         else:
@@ -261,7 +263,7 @@ def backup():
         logger.error(
             'Error occurred during connection to odoo.  \
             Please check if odoo is reachable under the provided ODOO_URL.')
-    except pysftp.exceptions.ConnectionException:
+    except (SSHException, NoValidConnectionsError):
         logger.exception('Exception occurred during connecting to sFTP Server. \
                          Please check provided sFTP Credentials')
     except Exception as e:
@@ -297,7 +299,6 @@ def _backup_upload(handler, backup_file_path, backup_file_name):
     try:
         logger.info(f'Uploading backup to {SFTP_HOST}.')
         handler.upload(backup_file_path, backup_file_name)
-        os.remove(backup_file_path)
     except Exception as e:
         logger.exception(f'Exception occurred during backup upload: {e}')
 
@@ -305,33 +306,33 @@ def _backup_upload(handler, backup_file_path, backup_file_name):
 def _backup_cleanup(handler, now):
     try:
         logger.info('Cleaning up old backups.')
-        backups_to_remove = []
+        backups_to_remove = set()
 
-        files = _get_files_with_datetime(handler)
+        files = list(_get_files_with_datetime(handler))
 
         if BACKUP_EVERY_HOUR:
             backup_time_to_keep = int(BACKUP_TIME.split(":")[0])
             hours = HOURLY_BACKUP_KEEP * BACKUP_EVERY_HOUR
-            backups_to_remove.extend(
+            backups_to_remove.update(
                 filter(lambda x: x[0] <= now - relativedelta(hours=hours) and
                                  x[0].hour != backup_time_to_keep, files)
             )
-        backups_to_remove.extend(
+        backups_to_remove.update(
             filter(lambda x: x[0] <= now - relativedelta(days=DAILY_BACKUP_KEEP) and
                              x[0].day != 1, files)
         )
 
-        backups_to_remove.extend(
+        backups_to_remove.update(
             filter(lambda x: x[0] <= now - relativedelta(months=MONTHLY_BACKUP_KEEP) and
                              x[0].month != 1, files)
         )
 
         if YEARLY_BACKUP_KEEP != -1:
-            backups_to_remove.extend(
+            backups_to_remove.update(
                 filter(lambda x: x[0] <= now - relativedelta(years=YEARLY_BACKUP_KEEP), files)
             )
 
-        return backups_to_remove
+        return list(backups_to_remove)
     except Exception as e:
         logger.exception(f'Exception occurred during backup cleanup: {e}')
 
