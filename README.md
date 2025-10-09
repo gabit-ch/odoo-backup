@@ -34,7 +34,7 @@ odoo-backup is a stateless docker service that creates rotating backups of odoo 
 * ```TEST_MODE``` **optional, set TEST_MODE=True to directly execute backup without scheduling
 
 ## Releases
-### 1.0.11
+### 1.1.0
 * Improve thread handling with the abort event and optimize code.
 
 ### 1.0.10
