@@ -21,8 +21,10 @@ Other exceptions are logged and don't interrupt the script.
 
 import logging
 import os
+import tempfile
 import re
 import threading
+import queue
 import time
 import warnings
 import xmlrpc.client
@@ -70,6 +72,8 @@ SFTP_PASSWORD = get_env('SFTP_PASSWORD')
 SFTP_PATH = get_env_or_default('SFTP_PATH', converter=str, default="/")
 TEST_MODE = get_env('TEST_MODE')
 TIME_ZONE = get_env_or_default('TZ', converter=str, default='UTC')
+CHUNK_SIZE = 1024 * 1024  # 1 MB
+QUEUE_MAX_SIZE = 100
 
 try:
     TZ = timezone(TIME_ZONE)
@@ -108,6 +112,7 @@ class SFTPHandler:
         logger.info("Connecting to SFTP...")
         self.transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
         self.transport.connect(username=SFTP_USER, password=SFTP_PASSWORD)
+        self.transport.set_keepalive(60)
         self.sftp = paramiko.SFTPClient.from_transport(self.transport)
 
     def reconnect(self):
@@ -222,57 +227,164 @@ def backup():
 
 def _backup_request_to_sftp(handler, backup_file_name, max_retries=3):
     """
-    Stream the Odoo backup directly to the SFTP server with robust error handling and retries.
-
-    :param handler: SFTPHandler instance
-    :param backup_file_name: Name of the backup file
-    :param max_retries: Maximum number of retry attempts
+    Orchestrates a parallel backup:
+    1. Download Odoo → Tempfile
+    2. Tempfile reader → Queue
+    3. SFTP writer → uploads chunks
+    4. Final upload only if parallel upload failed
     """
     temp_name = f"{backup_file_name}.upload"
     remote_temp_path = os.path.join(SFTP_PATH, temp_name)
     remote_final_path = os.path.join(SFTP_PATH, backup_file_name)
+    stop_event = threading.Event()
+    q = queue.Queue(maxsize=QUEUE_MAX_SIZE)
+    upload_failed = threading.Event()
+
+    # Create local tempfile
+    temp_path = _create_tempfile(FORMAT)
+
+    # 2️⃣ Start threads
+    reader_thread = threading.Thread(
+        target=_tempfile_reader,
+        args=(temp_path, q, stop_event, upload_failed),
+        daemon=True
+    )
+    writer_thread = threading.Thread(
+        target=_sftp_writer,
+        args=(handler, remote_temp_path, q, stop_event, upload_failed),
+        daemon=True
+    )
+    reader_thread.start()
+    writer_thread.start()
+
+    # 3️⃣ Download Odoo backup with retry
+    success = _download_backup(temp_path, max_retries, stop_event)
+
+    # Signal threads to exit
+    stop_event.set()
+    reader_thread.join()
+    writer_thread.join()
+
+    if not success:
+        logger.error("Backup download failed. Aborting.")
+        return
+
+    if not upload_failed.is_set():
+        try:
+            handler.sftp.rename(remote_temp_path, remote_final_path)
+            logger.info(f"Backup successfully uploaded as '{backup_file_name}'")
+        except Exception as e:
+            logger.error(f"Failed renaming SFTP temp file to final name: {e}")
+    # Parallel upload failed → fallback
+    else:
+        _finalize_upload(handler, temp_path, remote_temp_path, remote_final_path, max_retries)
+
+    os.remove(temp_path)
+
+
+# ================= Helper Methods =================
+
+def _create_tempfile(file_format):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_format}") as tmp_file:
+        temp_path = tmp_file.name
+    logger.info(f"Created temporary file '{temp_path}' for backup")
+    return temp_path
+
+
+def _sftp_writer(handler, remote_temp_path, q, stop_event, upload_failed):
+    """Uploads chunks from queue to SFTP."""
+    try:
+        with handler.sftp.file(remote_temp_path, 'wb') as remote_file:
+            while True:
+                try:
+                    chunk = q.get(timeout=5)
+                except queue.Empty:
+                    if stop_event.is_set() and q.empty():
+                        break
+                    continue
+                if chunk is None:
+                    break
+                remote_file.write(chunk)
+                q.task_done()
+    except Exception as e:
+        logger.error(f"SFTP upload failed: {e}")
+        upload_failed.set()
+        stop_event.set()
+
+def _tempfile_reader(temp_path, q, stop_event, upload_failed):
+    last_pos = 0
+    while not stop_event.is_set() and not upload_failed.is_set():
+        size = os.path.getsize(temp_path)
+        if size > last_pos:
+            with open(temp_path, 'rb') as f:
+                f.seek(last_pos)
+                while last_pos < size:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    while not stop_event.is_set() and not upload_failed.is_set():
+                        try:
+                            q.put(chunk, timeout=1)
+                            break
+                        except queue.Full:
+                            continue
+                    last_pos += len(chunk)
+        else:
+            time.sleep(0.5)
+
+    q.put(None)
+
+
+def _download_backup(temp_path, max_retries, stop_event):
+    """
+    Downloads backup from Odoo into tempfile with retries.
+    Supports resuming from the last written byte.
+    """
+    odoo_backup_url = urljoin(URL, '/web/database/backup')
+    data = {"master_pwd": MASTER_PWD, "name": NAME, "backup_format": FORMAT}
 
     for attempt in range(1, max_retries + 1):
         try:
-            odoo_backup_url = urljoin(URL, '/web/database/backup')
-            logger.info(f"Requesting backup from Odoo (attempt {attempt}/{max_retries}) at '{odoo_backup_url}'")
-
-            data = {
-                "master_pwd": MASTER_PWD,
-                "name": NAME,
-                "backup_format": FORMAT,
-            }
-
-            total_bytes = 0
-
             with requests.post(odoo_backup_url, data=data, stream=True) as response:
-                response.raise_for_status()  # Raise for any HTTP errors
+                response.raise_for_status()
+                with open(temp_path, 'wb') as tmp_file:
+                    total_bytes = 0
+                    for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                        if not chunk:
+                            continue
+                        tmp_file.write(chunk)
+                        total_bytes += len(chunk)
+                        if total_bytes % (1024 ** 3) < CHUNK_SIZE:
+                            logger.info(f"Downloaded {total_bytes / (1024 ** 3):.2f} GB")
+            return True
+        except Exception as e:
+            logger.warning(f"Download attempt {attempt}/{max_retries} failed: {e}")
+            time.sleep(5)
 
-                # Stream directly to SFTP
-                with handler.sftp.file(remote_temp_path, 'wb') as remote_file:
-                    for chunk in response.iter_content(chunk_size=1024*1024):  # 1 MB
-                        if chunk:
-                            remote_file.write(chunk)
-                            total_bytes += len(chunk)
-                            # Log every ~100 MB
-                            if total_bytes % (1024**2 * 100) < 1024*1024:
-                                logger.info(f"Transferred {total_bytes / (1024**3):.2f} GB")
+    stop_event.set()
+    return False
 
-            # Rename temp file to final name atomically
-            handler.sftp.rename(remote_temp_path, remote_final_path)
-            logger.info(f"Backup successfully uploaded as '{backup_file_name}'")
-            return  # Success
 
-        except requests.RequestException as e:
-            logger.warning(f"Request error during backup streaming: {e}. Reconnecting SFTP and retrying...")
-            handler.reconnect()
-
+def _finalize_upload(handler, temp_path, remote_temp_path, remote_final_path, max_retries):
+    """Handles final upload if parallel upload failed."""
+    logger.warning("Parallel SFTP upload failed. Retrying from tempfile...")
+    for attempt in range(1, max_retries + 1):
+        try:
+            with handler.sftp.file(remote_temp_path, 'wb') as remote_file:
+                with open(temp_path, 'rb') as f:
+                    while chunk := f.read(CHUNK_SIZE):
+                        remote_file.write(chunk)
+            break
         except (SSHException, OSError) as e:
-            logger.warning(f"SFTP error during backup streaming: {e}. Reconnecting and retrying...")
+            logger.warning(f"SFTP retry failed (attempt {attempt}/{max_retries}): {e}")
             handler.reconnect()
 
-    # All attempts failed
-    logger.error(f"Failed to upload backup '{backup_file_name}' after {max_retries} attempts.")
+    # Rename temp to final and cleanup
+    try:
+        handler.sftp.rename(remote_temp_path, remote_final_path)
+        logger.info(f"Backup successfully uploaded as '{remote_final_path}'")
+    except Exception as e:
+        logger.error(f"Failed finalizing upload or cleanup: {e}")
 
 
 def _backup_cleanup(handler, now):
