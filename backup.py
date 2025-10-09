@@ -204,12 +204,9 @@ def backup():
             now = datetime.now(tz=TZ)
             backup_file_name = f"odoo{version['server_serie']}-{NAME}-{now.strftime('%Y%m%d-%H%M%S')}.{FORMAT}"
 
-            handler = SFTPHandler()
-            try:
-                _backup_request_to_sftp(handler, backup_file_name)
-                _backup_cleanup(handler, now)
-            finally:
-                handler.close()
+            _backup_request_to_sftp(backup_file_name)
+            _backup_cleanup(now)
+
             logger.info(f'*** Finished backup process for odoo {version["server_serie"]} '
                         f'with database "{NAME}" on "{URL}" ***')
         else:
@@ -225,9 +222,9 @@ def backup():
         logger.exception(f'Exception occurred during backup: {e}')
 
 
-def _backup_request_to_sftp(handler, backup_file_name, max_retries=3):
+def _backup_request_to_sftp(backup_file_name, max_retries=3):
     """
-    Orchestrates a parallel backup:
+    Parallel backup:
     1. Download Odoo → Tempfile
     2. Tempfile reader → Queue
     3. SFTP writer → uploads chunks
@@ -236,50 +233,45 @@ def _backup_request_to_sftp(handler, backup_file_name, max_retries=3):
     temp_name = f"{backup_file_name}.upload"
     remote_temp_path = os.path.join(SFTP_PATH, temp_name)
     remote_final_path = os.path.join(SFTP_PATH, backup_file_name)
-    stop_event = threading.Event()
+    abort_event = threading.Event()
+    start_write_event = threading.Event()
     q = queue.Queue(maxsize=QUEUE_MAX_SIZE)
-    upload_failed = threading.Event()
 
-    # Create local tempfile
+    # Create tempfile
     temp_path = _create_tempfile(FORMAT)
 
-    # 2️⃣ Start threads
+    # --- Start reader/writer threads ---
     reader_thread = threading.Thread(
         target=_tempfile_reader,
-        args=(temp_path, q, stop_event, upload_failed),
+        args=(temp_path, q, abort_event),
         daemon=True
     )
     writer_thread = threading.Thread(
         target=_sftp_writer,
-        args=(handler, remote_temp_path, q, stop_event, upload_failed),
+        args=(remote_temp_path, remote_final_path, q, abort_event, start_write_event),
         daemon=True
     )
     reader_thread.start()
     writer_thread.start()
 
-    # 3️⃣ Download Odoo backup with retry
-    success = _download_backup(temp_path, max_retries, stop_event)
-
-    # Signal threads to exit
-    stop_event.set()
-    reader_thread.join()
-    writer_thread.join()
+    # --- Download backup ---
+    success = _download_backup(temp_path, max_retries, abort_event, start_write_event)
 
     if not success:
         logger.error("Backup download failed. Aborting.")
+        abort_event.set()
         return
 
-    if not upload_failed.is_set():
-        try:
-            handler.sftp.rename(remote_temp_path, remote_final_path)
-            logger.info(f"Backup successfully uploaded as '{backup_file_name}'")
-        except Exception as e:
-            logger.error(f"Failed renaming SFTP temp file to final name: {e}")
-    # Parallel upload failed → fallback
-    else:
-        _finalize_upload(handler, temp_path, remote_temp_path, remote_final_path, max_retries)
+    reader_thread.join()
+    writer_thread.join()
+    logger.info("Reader and writer threads finished. Proceeding to finalize.")
 
-    os.remove(temp_path)
+    try:
+        if abort_event.is_set():
+            _finalize_upload(temp_path, remote_temp_path, remote_final_path, max_retries)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 # ================= Helper Methods =================
@@ -291,55 +283,116 @@ def _create_tempfile(file_format):
     return temp_path
 
 
-def _sftp_writer(handler, remote_temp_path, q, stop_event, upload_failed):
-    """Uploads chunks from queue to SFTP."""
+def _sftp_writer(remote_temp_path, remote_final_path, q, abort_event, start_write_event,
+                 write_retries=3, retry_delay=2):
+    """Uploads chunks from queue to SFTP with retry on transient write failures.
+
+    Behavior:
+    - Waits until download has started (start_write_event).
+    - Reads chunks from queue. For each chunk it retries writes up to write_retries.
+    - Calls q.task_done() exactly once per q.get() call (including the sentinel None).
+    - On permanent write failure it sets abort_event and returns early.
+    - On success it renames the remote temp file to final.
+    """
+    start_write_event.wait()
+    handler = SFTPHandler()
+    if abort_event.is_set():
+        handler.close()
+        return
+
+    upload_success = False
     try:
         with handler.sftp.file(remote_temp_path, 'wb') as remote_file:
             while True:
                 try:
                     chunk = q.get(timeout=5)
                 except queue.Empty:
-                    if stop_event.is_set() and q.empty():
+                    # nothing to do; if download finished and queue empty, break
+                    if abort_event.is_set() and q.empty():
                         break
                     continue
+
+                # sentinel -> end-of-stream
                 if chunk is None:
+                    # match the get(): mark done and break
+                    q.task_done()
                     break
-                remote_file.write(chunk)
-                q.task_done()
+
+                # attempt to write with retries
+                write_ok = False
+                for attempt in range(1, write_retries + 1):
+                    try:
+                        remote_file.write(chunk)
+                        write_ok = True
+                        break
+                    except Exception as e:
+                        # transient-ish error: retry a few times
+                        logger.warning(
+                            "SFTP write failed (attempt %d/%d): %s",
+                            attempt, write_retries, e
+                        )
+                        if attempt < write_retries:
+                            time.sleep(retry_delay)
+
+                # mark the queue item done (we consumed it)
+                try:
+                    q.task_done()
+                except Exception:
+                    # defensive: ensure we don't crash on task_done bookkeeping problems
+                    logger.debug("q.task_done() raised unexpectedly")
+
+                if not write_ok:
+                    # permanent failure for this chunk -> abort upload
+                    logger.error("Permanent SFTP write failure, aborting parallel upload")
+                    abort_event.set()
+                    return
+
+        # only if we reached here (all chunks written) mark success
+        upload_success = True
+
     except Exception as e:
         logger.error(f"SFTP upload failed: {e}")
-        upload_failed.set()
-        stop_event.set()
+        abort_event.set()
 
-def _tempfile_reader(temp_path, q, stop_event, upload_failed):
+    finally:
+        # finalize: rename remote temp -> final if upload succeeded
+        if upload_success:
+            try:
+                handler.sftp.rename(remote_temp_path, remote_final_path)
+                logger.info(f"Backup successfully uploaded as '{remote_final_path}'")
+            except Exception as e:
+                logger.error(f"Failed renaming SFTP temp file to final name: {e}")
+                abort_event.set()
+        handler.close()
+
+
+def _tempfile_reader(temp_path, q, abort_event):
     last_pos = 0
-    while not stop_event.is_set() and not upload_failed.is_set():
-        size = os.path.getsize(temp_path)
-        if size > last_pos:
-            with open(temp_path, 'rb') as f:
-                f.seek(last_pos)
-                while last_pos < size:
-                    chunk = f.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    while not stop_event.is_set() and not upload_failed.is_set():
-                        try:
-                            q.put(chunk, timeout=1)
+    try:
+        while not abort_event.is_set():
+            size = os.path.getsize(temp_path)
+            if size > last_pos:
+                with open(temp_path, 'rb') as f:
+                    f.seek(last_pos)
+                    while last_pos < size:
+                        chunk = f.read(CHUNK_SIZE)
+                        if not chunk:
                             break
-                        except queue.Full:
-                            continue
-                    last_pos += len(chunk)
-        else:
-            time.sleep(0.5)
+                        while not abort_event.is_set():
+                            try:
+                                q.put(chunk, timeout=1)
+                                break
+                            except queue.Full:
+                                continue
+                        last_pos += len(chunk)
+            else:
+                time.sleep(0.5)
+    finally:
+        # always signal the consumer to exit
+        q.put(None)
 
-    q.put(None)
 
-
-def _download_backup(temp_path, max_retries, stop_event):
-    """
-    Downloads backup from Odoo into tempfile with retries.
-    Supports resuming from the last written byte.
-    """
+def _download_backup(temp_path, max_retries, abort_event, start_write_event):
     odoo_backup_url = urljoin(URL, '/web/database/backup')
     data = {"master_pwd": MASTER_PWD, "name": NAME, "backup_format": FORMAT}
 
@@ -354,6 +407,9 @@ def _download_backup(temp_path, max_retries, stop_event):
                             continue
                         tmp_file.write(chunk)
                         total_bytes += len(chunk)
+                        # Signal the first chunk
+                        if not start_write_event.is_set():
+                            start_write_event.set()
                         if total_bytes % (1024 ** 3) < CHUNK_SIZE:
                             logger.info(f"Downloaded {total_bytes / (1024 ** 3):.2f} GB")
             return True
@@ -361,13 +417,15 @@ def _download_backup(temp_path, max_retries, stop_event):
             logger.warning(f"Download attempt {attempt}/{max_retries} failed: {e}")
             time.sleep(5)
 
-    stop_event.set()
+    start_write_event.set()
+    abort_event.set()
     return False
 
 
-def _finalize_upload(handler, temp_path, remote_temp_path, remote_final_path, max_retries):
+def _finalize_upload(temp_path, remote_temp_path, remote_final_path, max_retries):
     """Handles final upload if parallel upload failed."""
     logger.warning("Parallel SFTP upload failed. Retrying from tempfile...")
+    handler = SFTPHandler()
     for attempt in range(1, max_retries + 1):
         try:
             with handler.sftp.file(remote_temp_path, 'wb') as remote_file:
@@ -385,9 +443,11 @@ def _finalize_upload(handler, temp_path, remote_temp_path, remote_final_path, ma
         logger.info(f"Backup successfully uploaded as '{remote_final_path}'")
     except Exception as e:
         logger.error(f"Failed finalizing upload or cleanup: {e}")
+    finally:
+        handler.close()
 
 
-def _backup_cleanup(handler, now):
+def _backup_cleanup(now):
     """
     Determine which backups to remove according to retention policy:
     - Keep last 24 hourly backups (interval defined by BACKUP_EVERY_HOUR)
@@ -395,6 +455,7 @@ def _backup_cleanup(handler, now):
     - Keep last 12 monthly backups
     - Keep yearly backups according to YEARLY_BACKUP_KEEP
     """
+    handler = SFTPHandler()
     try:
         logger.info("Cleaning up old backups.")
         files = list(_get_files_with_datetime(handler))
@@ -445,6 +506,8 @@ def _backup_cleanup(handler, now):
     except Exception as e:
         logger.exception(f"Exception occurred during backup cleanup: {e}")
         return []
+    finally:
+        handler.close()
 
 
 def _get_files_with_datetime(handler):
