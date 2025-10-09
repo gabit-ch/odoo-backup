@@ -34,6 +34,9 @@ odoo-backup is a stateless docker service that creates rotating backups of odoo 
 * ```TEST_MODE``` **optional, set TEST_MODE=True to directly execute backup without scheduling
 
 ## Releases
+### 1.0.9
+* Write backup directly to sftp without local storing the backup.
+
 ### 1.0.8
 * Replace pysftp with paramiko.
 * Optimize SFTPHandler.

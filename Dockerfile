@@ -29,9 +29,6 @@ RUN apk add --no-cache --virtual .build-deps \
 # Copy the rest of the files
 COPY backup.py .
 
-# Create directory for backups
-RUN mkdir -p /usr/app/src/backups && chmod 755 /usr/app/src/backups
-
 # Optional: non-root user for security
 RUN adduser -D appuser
 USER appuser
