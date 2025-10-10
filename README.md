@@ -32,30 +32,23 @@ odoo-backup is a stateless docker service that creates rotating backups of odoo 
 * ```MONTHLY_BACKUP_KEEP``` **optional, set count of monthly backups to keep, default=12
 * ```YEARLY_BACKUP_KEEP``` **optional, set count of yearly backups to keep (unlimited=-1), default=-1
 * ```TEST_MODE``` **optional, set TEST_MODE=True to directly execute backup without scheduling
+* ```BACKUP_CHUNK_SIZE_MB``` **optional, upload/download pipeline chunk size in megabytes (default=4). Tune based on network/latency; 2–8 is typical.
+* ```BACKUP_QUEUE_MAX_SIZE``` **optional, max queued chunks between downloader and uploader (default=64). Increase to improve parallelism on high-latency links.
+* ```SFTP_SSH_CIPHERS``` **optional, comma-separated preferred SSH ciphers (default: chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes128-ctr)
+* ```SFTP_SSH_COMPRESSION``` **optional, enable SSH compression true/false (default: false)
+* ```SFTP_REKEY_BYTES``` **optional, rekey threshold in bytes (default: 17179869184 i.e. 16 GiB)
+* ```SFTP_REKEY_PACKETS``` **optional, rekey threshold in packets (default: 4294967296)
+* ```SFTP_TCP_NO_DELAY``` **optional, set TCP_NODELAY on SSH socket true/false (default: true)
+* ```SFTP_SOCK_BUF_KB``` **optional, socket send/recv buffer size in KiB (default: 1024)
 
 ## Releases
-### 1.1.0
-* Improve thread handling with the abort event and optimize code.
-
-### 1.0.10
-* Add a local buffer and do asynchron download and upload by using a queue.
-
-### 1.0.9
-* Write backup directly to sftp without local storing the backup.
-
-### 1.0.8
-* Replace pysftp with paramiko.
-* Optimize SFTPHandler.
-* Add additional logging.
-* Add additional checks.
-* Update to python 3.13
-* Update python packages to newest versions.
-
-### 1.0.7
-* Add .upload on filename during upload, so that uncompleted uploads can be identified.
-
 ### 1.0.6
-* Add additional supported backup formats.
+* Add additional supported backup formats
+* Replace pysftp with paramiko
+* Optimize SFTPHandler
+* Add additional logging
+* Update to python 3.13
+* Update python packages to newest versions
 
 ### 1.0.5
 * Fix remove local backup in the container after upload and on start of container

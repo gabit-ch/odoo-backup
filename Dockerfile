@@ -2,8 +2,7 @@ FROM python:3.13-alpine
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    TZ=Europe/Zurich
+    PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /usr/app/src
 

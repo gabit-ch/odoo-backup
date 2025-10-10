@@ -23,9 +23,9 @@ import logging
 import os
 import tempfile
 import re
-import threading
-import queue
 import time
+import threading
+import shutil
 import warnings
 import xmlrpc.client
 from datetime import datetime
@@ -34,6 +34,7 @@ from urllib.parse import urljoin
 import paramiko
 import requests
 import schedule
+from dateutil.relativedelta import relativedelta
 from paramiko.ssh_exception import SSHException, NoValidConnectionsError
 from pytz import timezone, UnknownTimeZoneError
 
@@ -72,8 +73,6 @@ SFTP_PASSWORD = get_env('SFTP_PASSWORD')
 SFTP_PATH = get_env_or_default('SFTP_PATH', converter=str, default="/")
 TEST_MODE = get_env('TEST_MODE')
 TIME_ZONE = get_env_or_default('TZ', converter=str, default='UTC')
-CHUNK_SIZE = 1024 * 1024  # 1 MB
-QUEUE_MAX_SIZE = 100
 
 try:
     TZ = timezone(TIME_ZONE)
@@ -110,7 +109,10 @@ class SFTPHandler:
 
     def connect(self):
         logger.info("Connecting to SFTP...")
-        self.transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+        self.transport = paramiko.Transport(SFTP_HOST, SFTP_PORT)
+        self.transport.default_window_size = 1024 * 1024 * 1024  # 1 GB
+        self.transport.packetizer.REKEY_BYTES = pow(2, 40)
+        self.transport.packetizer.REKEY_PACKETS = pow(2, 40)
         self.transport.connect(username=SFTP_USER, password=SFTP_PASSWORD)
         self.transport.set_keepalive(60)
         self.sftp = paramiko.SFTPClient.from_transport(self.transport)
@@ -128,8 +130,82 @@ class SFTPHandler:
         :return: None
         """
 
+        logger.warning("Reconnecting SFTP...")
         self.close()
+        time.sleep(3)
         self.connect()
+
+    def upload(self, local_path, file_name, retries=2, chunk_size=8*1024*1024):
+        remote_path = os.path.join(SFTP_PATH, file_name)
+        temp_remote_path = remote_path + ".upload"
+        file_size = os.path.getsize(local_path)
+
+        success = False  # track upload success
+
+        for attempt in range(1, retries + 1):
+            try:
+                remote_size = 0
+                try:
+                    remote_attr = self.sftp.stat(temp_remote_path)
+                    remote_size = remote_attr.st_size
+                    logger.info(f"Resuming from {remote_size / file_size:.2%}")
+                except IOError:
+                    pass
+
+                with open(local_path, "rb", buffering=0) as local_file, \
+                        self.sftp.open(temp_remote_path, "ab" if remote_size else "wb") as remote_file:
+                    if remote_size:
+                        local_file.seek(remote_size)
+                    remote_file.set_pipelined(True)
+
+                    self._write_data(local_file, remote_file, file_name, file_size, chunk_size, remote_size)
+
+                # Atomic rename when upload done
+                self.sftp.rename(temp_remote_path, remote_path)
+                logger.info("✅ Upload completed successfully")
+                success = True
+                break  # stop retrying if done
+
+            except Exception as e:
+                logger.error(f"⚠️ Upload failed (attempt {attempt}/{retries}): {e}")
+                self.reconnect()
+
+        # --- Always cleanup the local file ---
+        try:
+            os.remove(local_path)
+            logger.info(f"🧹 Removed local file after upload: {local_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not remove local file {local_path}: {e}")
+
+        if not success:
+            raise RuntimeError(f"⚠️ Upload failed after {retries} retries.")
+
+    @staticmethod
+    def _write_data(local_file, remote_file, file_name, file_size, chunk_size, offset):
+        start_time = time.time()
+        last_log_time = start_time
+        log_interval = 100 * 1024 * 1024  # 100 MB
+        next_log_threshold = offset + log_interval
+
+        while True:
+            data = local_file.read(chunk_size)
+            if not data:
+                break
+            remote_file.write(data)
+            offset += len(data)
+
+            # Log every 100 MB or more
+            if offset >= next_log_threshold or (time.time() - last_log_time > 15):
+                elapsed = time.time() - start_time
+                speed = offset / elapsed  # bytes per second
+                logger.info(
+                    f'Uploading {file_name}: '
+                    f'{offset / file_size:.2%} '
+                    f'({offset / (1024 ** 3):.2f} GB) '
+                    f'- {speed / (1024 ** 2):.2f} MB/s'
+                )
+                last_log_time = time.time()
+                next_log_threshold += log_interval
 
     def remove(self, remote_name, retries=2):
         """Removes a file from the SFTP server.
@@ -140,36 +216,41 @@ class SFTPHandler:
             The number of connection retries, if connection drops in
         :return: None
         """
-        for _ in range(1, retries + 1):
+        for attempt in range(1, retries + 1):
             try:
                 self.sftp.remove(os.path.join(SFTP_PATH, remote_name))
+                logger.info(f"Successfully removed remote file '{remote_name}'")
                 return
             except SSHException as e:
-                logger.error(f"SFTP remove error: {e}, reconnecting...")
+                logger.error(f"SFTP remove error: {e}, reconnecting attempt {attempt}...")
                 self.reconnect()
         logger.error(f"Failed to remove remote file '{remote_name}'")
 
-    def list_files(self):
+    def list_files(self, retries=2):
         """Lists all files in a specific directory on the SFTP server.
         :param retries: int
             The number of connection retries, if connection drops in
         :return: list
             Returns a list of filenames in the SFTP directory.
         """
-        try:
-            return self.sftp.listdir(SFTP_PATH)
-        except SSHException as e:
-            logger.error(f"SFTP list error: {e}")
-            self.reconnect()
-            return []
+        for attempt in range(1, retries + 1):
+            try:
+                return self.sftp.listdir(SFTP_PATH)
+            except SSHException as e:
+                logger.error(f"SFTP session error: {str(e)}, Attempting to reconnect...")
+                self.reconnect()  # assuming you have defined a reconnect method
+        logger.error(f'Failed to upload after {retries} retries.')
+        return []
 
     def close(self):
         """Closes the connection with the SFTP server.
 
         :return: None
         """
-        if self.sftp: self.sftp.close()
-        if self.transport: self.transport.close()
+        if self.sftp:
+            self.sftp.close()
+        if self.transport:
+            self.transport.close()
 
 
 def backup():
@@ -193,7 +274,6 @@ def backup():
     :raises xmlrpc.client.Fault: If a fault error occurs while contacting the Odoo server.
     :raises pysftp.exceptions.ConnectionException: If a connection error occurs while contacting the SFTP server.
     """
-
     try:
         if (URL and MASTER_PWD and NAME and FORMAT.lower() in ALLOWED_FORMATS and
                 SFTP_HOST and SFTP_USER and SFTP_PASSWORD):
@@ -201,14 +281,21 @@ def backup():
             version = common.version()
             logger.info(f'*** Starting backup process for odoo {version["server_serie"]} '
                         f'with database "{NAME}" on "{URL}" ***')
+
             now = datetime.now(tz=TZ)
-            backup_file_name = f"odoo{version['server_serie']}-{NAME}-{now.strftime('%Y%m%d-%H%M%S')}.{FORMAT}"
+            file_name = f"odoo{version['server_serie']}-{NAME}-{now.strftime('%Y%m%d-%H%M%S')}.{FORMAT.lower()}"
+            local_path = _backup_request(file_name)
+            if not local_path:
+                return
 
-            _backup_request_to_sftp(backup_file_name)
-            _backup_cleanup(now)
-
-            logger.info(f'*** Finished backup process for odoo {version["server_serie"]} '
-                        f'with database "{NAME}" on "{URL}" ***')
+            handler = SFTPHandler()
+            try:
+                _backup_upload(handler, local_path, file_name)
+                _backup_cleanup(handler, now)
+            finally:
+                handler.close()
+                logger.info(f'*** Finished backup process for odoo {version["server_serie"]} '
+                            f'with database "{NAME}" on "{URL}" ***')
         else:
             _backup_help()
     except (xmlrpc.client.ProtocolError, xmlrpc.client.Fault):
@@ -222,298 +309,101 @@ def backup():
         logger.exception(f'Exception occurred during backup: {e}')
 
 
-def _backup_request_to_sftp(backup_file_name, max_retries=3):
-    """
-    Parallel backup:
-    1. Download Odoo → Tempfile
-    2. Tempfile reader → Queue
-    3. SFTP writer → uploads chunks
-    4. Final upload only if parallel upload failed
-    """
-    temp_name = f"{backup_file_name}.upload"
-    remote_temp_path = os.path.join(SFTP_PATH, temp_name)
-    remote_final_path = os.path.join(SFTP_PATH, backup_file_name)
-    abort_event = threading.Event()
-    start_write_event = threading.Event()
-    q = queue.Queue(maxsize=QUEUE_MAX_SIZE)
-
-    # Create tempfile
-    temp_path = _create_tempfile(FORMAT)
-
-    # --- Start reader/writer threads ---
-    reader_thread = threading.Thread(
-        target=_tempfile_reader,
-        args=(temp_path, q, abort_event),
-        daemon=True
-    )
-    writer_thread = threading.Thread(
-        target=_sftp_writer,
-        args=(remote_temp_path, remote_final_path, q, abort_event, start_write_event),
-        daemon=True
-    )
-    reader_thread.start()
-    writer_thread.start()
-
-    # --- Download backup ---
-    success = _download_backup(temp_path, max_retries, abort_event, start_write_event)
-
-    if not success:
-        logger.error("Backup download failed. Aborting.")
-        abort_event.set()
-        return
-
-    reader_thread.join()
-    writer_thread.join()
-    logger.info("Reader and writer threads finished. Proceeding to finalize.")
-
+def _backup_request(file_name, chunk_size=8*1024*1024):
     try:
-        if abort_event.is_set():
-            _finalize_upload(temp_path, remote_temp_path, remote_final_path, max_retries)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        odoo_backup_url = urljoin(URL, '/web/database/backup')
+        logger.info(f'Requesting backup on url "{odoo_backup_url}"')
+        data = {
+            "master_pwd": MASTER_PWD,
+            "name": NAME,
+            "backup_format": FORMAT,
+        }
+        log_interval = 100 * 1024 * 1024
 
+        with requests.post(odoo_backup_url, data=data, stream=True, timeout=600) as response:
+            response.raise_for_status()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{FORMAT}") as tmp:
+                local_path = tmp.name
+                logger.info(f"⬇️ Starting download to temporary file: {local_path}")
 
-# ================= Helper Methods =================
+                downloaded = 0
+                start_time = time.time()
+                last_log_time = start_time
+                next_log_threshold = log_interval
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if not chunk:
+                        continue
+                    tmp.write(chunk)
+                    downloaded += len(chunk)
 
-def _create_tempfile(file_format):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_format}") as tmp_file:
-        temp_path = tmp_file.name
-    logger.info(f"Created temporary file '{temp_path}' for backup")
-    return temp_path
-
-
-def _sftp_writer(remote_temp_path, remote_final_path, q, abort_event, start_write_event,
-                 write_retries=3, retry_delay=2):
-    """Uploads chunks from queue to SFTP with retry on transient write failures.
-
-    Behavior:
-    - Waits until download has started (start_write_event).
-    - Reads chunks from queue. For each chunk it retries writes up to write_retries.
-    - Calls q.task_done() exactly once per q.get() call (including the sentinel None).
-    - On permanent write failure it sets abort_event and returns early.
-    - On success it renames the remote temp file to final.
-    """
-    start_write_event.wait()
-    handler = SFTPHandler()
-    if abort_event.is_set():
-        handler.close()
-        return
-
-    upload_success = False
-    try:
-        with handler.sftp.file(remote_temp_path, 'wb') as remote_file:
-            while True:
-                try:
-                    chunk = q.get(timeout=5)
-                except queue.Empty:
-                    # nothing to do; if download finished and queue empty, break
-                    if abort_event.is_set() and q.empty():
-                        break
-                    continue
-
-                # sentinel -> end-of-stream
-                if chunk is None:
-                    # match the get(): mark done and break
-                    q.task_done()
-                    break
-
-                # attempt to write with retries
-                write_ok = False
-                for attempt in range(1, write_retries + 1):
-                    try:
-                        remote_file.write(chunk)
-                        write_ok = True
-                        break
-                    except Exception as e:
-                        # transient-ish error: retry a few times
-                        logger.warning(
-                            "SFTP write failed (attempt %d/%d): %s",
-                            attempt, write_retries, e
+                    if downloaded >= next_log_threshold or (time.time() - last_log_time > 15):
+                        elapsed = time.time() - start_time
+                        speed_mb_s = downloaded / elapsed / (1024 ** 2)
+                        logger.info(
+                            f'Downloading {file_name}: '
+                            f'{downloaded / (1024 ** 3):.2f} GB '
+                            f'– {speed_mb_s:.2f} MB/s'
                         )
-                        if attempt < write_retries:
-                            time.sleep(retry_delay)
+                        last_log_time = time.time()
+                        next_log_threshold += log_interval
 
-                # mark the queue item done (we consumed it)
-                try:
-                    q.task_done()
-                except Exception:
-                    # defensive: ensure we don't crash on task_done bookkeeping problems
-                    logger.debug("q.task_done() raised unexpectedly")
+                elapsed = time.time() - start_time
+                total_gb = downloaded / (1024 ** 3)
+                avg_speed = total_gb * 1024 / elapsed
+                logger.info(
+                    f"✅ Backup {file_name} successfully saved to temp file: {local_path} "
+                    f"({total_gb:.2f} GB in {elapsed:.1f}s, {avg_speed:.2f} MB/s avg)"
+                )
 
-                if not write_ok:
-                    # permanent failure for this chunk -> abort upload
-                    logger.error("Permanent SFTP write failure, aborting parallel upload")
-                    abort_event.set()
-                    return
+                return local_path
+    except requests.RequestException as e:
+        logger.exception(f'❌ Exception occurred during backup request: {e}')
+        return None
 
-        # only if we reached here (all chunks written) mark success
-        upload_success = True
 
+def _backup_upload(handler, local_path, file_name):
+    try:
+        logger.info(f'Uploading backup to {SFTP_HOST}.')
+        handler.upload(local_path, file_name)
     except Exception as e:
-        logger.error(f"SFTP upload failed: {e}")
-        abort_event.set()
-
-    finally:
-        # finalize: rename remote temp -> final if upload succeeded
-        if upload_success:
-            try:
-                handler.sftp.rename(remote_temp_path, remote_final_path)
-                logger.info(f"Backup successfully uploaded as '{remote_final_path}'")
-            except Exception as e:
-                logger.error(f"Failed renaming SFTP temp file to final name: {e}")
-                abort_event.set()
-        handler.close()
+        logger.exception(f'Exception occurred during backup upload: {e}')
 
 
-def _tempfile_reader(temp_path, q, abort_event):
-    last_pos = 0
+def _backup_cleanup(handler, now):
     try:
-        while not abort_event.is_set():
-            size = os.path.getsize(temp_path)
-            if size > last_pos:
-                with open(temp_path, 'rb') as f:
-                    f.seek(last_pos)
-                    while last_pos < size:
-                        chunk = f.read(CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        while not abort_event.is_set():
-                            try:
-                                q.put(chunk, timeout=1)
-                                break
-                            except queue.Full:
-                                continue
-                        last_pos += len(chunk)
-            else:
-                time.sleep(0.5)
-    finally:
-        # always signal the consumer to exit
-        q.put(None)
+        logger.info('Cleaning up old backups.')
+        backups_to_remove = []
 
+        files = _get_files_with_datetime(handler)
 
-def _download_backup(temp_path, max_retries, abort_event, start_write_event):
-    odoo_backup_url = urljoin(URL, '/web/database/backup')
-    data = {"master_pwd": MASTER_PWD, "name": NAME, "backup_format": FORMAT}
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            with requests.post(odoo_backup_url, data=data, stream=True) as response:
-                response.raise_for_status()
-                with open(temp_path, 'wb') as tmp_file:
-                    total_bytes = 0
-                    for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-                        if not chunk:
-                            continue
-                        tmp_file.write(chunk)
-                        total_bytes += len(chunk)
-                        # Signal the first chunk
-                        if not start_write_event.is_set():
-                            start_write_event.set()
-                        if total_bytes % (1024 ** 3) < CHUNK_SIZE:
-                            logger.info(f"Downloaded {total_bytes / (1024 ** 3):.2f} GB")
-            return True
-        except Exception as e:
-            logger.warning(f"Download attempt {attempt}/{max_retries} failed: {e}")
-            time.sleep(5)
-
-    start_write_event.set()
-    abort_event.set()
-    return False
-
-
-def _finalize_upload(temp_path, remote_temp_path, remote_final_path, max_retries):
-    """Handles final upload if parallel upload failed."""
-    logger.warning("Parallel SFTP upload failed. Retrying from tempfile...")
-    handler = SFTPHandler()
-    for attempt in range(1, max_retries + 1):
-        try:
-            with handler.sftp.file(remote_temp_path, 'wb') as remote_file:
-                with open(temp_path, 'rb') as f:
-                    while chunk := f.read(CHUNK_SIZE):
-                        remote_file.write(chunk)
-            break
-        except (SSHException, OSError) as e:
-            logger.warning(f"SFTP retry failed (attempt {attempt}/{max_retries}): {e}")
-            handler.reconnect()
-
-    # Rename temp to final and cleanup
-    try:
-        handler.sftp.rename(remote_temp_path, remote_final_path)
-        logger.info(f"Backup successfully uploaded as '{remote_final_path}'")
-    except Exception as e:
-        logger.error(f"Failed finalizing upload or cleanup: {e}")
-    finally:
-        handler.close()
-
-
-def _backup_cleanup(now):
-    """
-    Determine which backups to remove according to retention policy:
-    - Keep last 24 hourly backups (interval defined by BACKUP_EVERY_HOUR)
-    - Keep last 30 daily backups
-    - Keep last 12 monthly backups
-    - Keep yearly backups according to YEARLY_BACKUP_KEEP
-    """
-    handler = SFTPHandler()
-    try:
-        logger.info("Cleaning up old backups.")
-        files = list(_get_files_with_datetime(handler))
-        if not files:
-            return []
-
-        # Sort files newest first
-        files.sort(key=lambda x: x[0], reverse=True)
-
-        to_keep = set()
-
-        # Keep last 24 hourly backups
         if BACKUP_EVERY_HOUR:
-            hourly_backups = [f for f in files if (now - f[0]).total_seconds() < 24 * BACKUP_EVERY_HOUR * 3600]
-            to_keep.update(hourly_backups[:24])
+            backup_time_to_keep = int(BACKUP_TIME.split(":")[0])
+            hours = HOURLY_BACKUP_KEEP * BACKUP_EVERY_HOUR
+            backups_to_remove.extend(
+                filter(lambda x: x[0] <= now - relativedelta(hours=hours) and
+                                 x[0].hour != backup_time_to_keep, files)
+            )
+        backups_to_remove.extend(
+            filter(lambda x: x[0] <= now - relativedelta(days=DAILY_BACKUP_KEEP) and
+                             x[0].day != 1, files)
+        )
 
-        # Keep last 30 daily backups (exclude already kept)
-        daily_backups = [f for f in files if f not in to_keep]
-        to_keep.update(daily_backups[:DAILY_BACKUP_KEEP])
+        backups_to_remove.extend(
+            filter(lambda x: x[0] <= now - relativedelta(months=MONTHLY_BACKUP_KEEP) and
+                             x[0].month != 1, files)
+        )
 
-        # Keep last 12 monthly backups (exclude already kept)
-        monthly_backups = [f for f in files if f not in to_keep]
-        monthly_backups_dict = {}
-        for dt, name in monthly_backups:
-            key = (dt.year, dt.month)
-            if key not in monthly_backups_dict:
-                monthly_backups_dict[key] = (dt, name)
-        monthly_to_keep = sorted(monthly_backups_dict.values(), key=lambda x: x[0], reverse=True)[:MONTHLY_BACKUP_KEEP]
-        to_keep.update(monthly_to_keep)
-
-        # Yearly backups
         if YEARLY_BACKUP_KEEP != -1:
-            yearly_backups = [f for f in files if f not in to_keep]
-            yearly_backups_dict = {}
-            for dt, name in yearly_backups:
-                key = dt.year
-                if key not in yearly_backups_dict:
-                    yearly_backups_dict[key] = (dt, name)
-            yearly_to_keep = sorted(yearly_backups_dict.values(), key=lambda x: x[0], reverse=True)[:YEARLY_BACKUP_KEEP]
-            to_keep.update(yearly_to_keep)
-
-        # Files to remove
-        backups_to_remove = [f for f in files if f not in to_keep]
-        logger.info(f"{len(backups_to_remove)} backups will be removed according to retention policy.")
+            backups_to_remove.extend(
+                filter(lambda x: x[0] <= now - relativedelta(years=YEARLY_BACKUP_KEEP), files)
+            )
 
         _remove_backups(handler, backups_to_remove)
-
     except Exception as e:
-        logger.exception(f"Exception occurred during backup cleanup: {e}")
-        return []
-    finally:
-        handler.close()
+        logger.exception(f'Exception occurred during backup cleanup: {e}')
 
 
 def _get_files_with_datetime(handler):
-    """
-    Yield tuples of (datetime, filename) for files matching Odoo backup date pattern.
-    """
     pattern = re.compile(r'\d{8}-\d{6}')
     files = handler.list_files()
     for file in files:
@@ -522,9 +412,7 @@ def _get_files_with_datetime(handler):
             try:
                 yield datetime.strptime(match.group(), '%Y%m%d-%H%M%S').replace(tzinfo=TZ), file
             except ValueError as e:
-                logger.error(f'Value Error on getting date from file name "{file}": {e}')
-        else:
-            logger.debug(f"Skipping file '{file}' – does not match backup date pattern")
+                logger.error(f'Valuer Error on getting date from file name: {e}')
 
 
 def _remove_backups(handler, backups_to_remove):
@@ -549,9 +437,9 @@ def _backup_help():
     SFTP_HOST,  sFTP Server Address
     SFTP_USER, sFTP Server User
     SFTP_PASSWORD, sFTP Server Password
-    
+
     ***Optional Environment variables***
-    ODOO_BACKUP_FORMAT, Backup format  zip, dump or tar (additional module), default=zip
+    ODOO_BACKUP_FORMAT, Backup format  zip or dump, default=zip
     BACKUP_TIME, Start time for Backup or time which daily backup should be preserved, default="02:00"
     BACKUP_EVERY_HOUR, Set hours between the backups if hourly backup should be done, default=None
     DAILY_BACKUP_KEEP, Set count of daily backups to keep, default=30
@@ -576,6 +464,31 @@ def _get_backup_times():
         logger.error('An error occurred while retrieving the backup times. BACKUP_EVERY_HOUR can not be 0.')
 
 
+def clean_temp_folder():
+    """
+    Cleans the system temporary directory used by tempfile.
+    Useful to run at container startup to prevent leftover large files.
+    """
+    temp_dir = tempfile.gettempdir()
+    try:
+        logger.info(f"🧹 Cleaning system temporary directory: {temp_dir}")
+        for entry in os.listdir(temp_dir):
+            path = os.path.join(temp_dir, entry)
+            try:
+                if os.path.isfile(path) or os.path.islink(path):
+                    os.unlink(path)
+                    logger.debug(f"Removed temp file: {path}")
+                elif os.path.isdir(path):
+                    shutil.rmtree(path)
+                    logger.debug(f"Removed temp directory: {path}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not remove {path}: {e}")
+        logger.info(f"✅ Temp directory cleaned successfully: {temp_dir}")
+    except Exception as e:
+        logger.exception(f"❌ Error while cleaning temp directory {temp_dir}: {e}")
+
+
+clean_temp_folder()
 if TEST_MODE:
     logger.info('Running backup in TEST_MODE.')
     threaded_backup()
