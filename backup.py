@@ -320,7 +320,7 @@ def _backup_request(file_name, chunk_size=8*1024*1024):
         }
         log_interval = 100 * 1024 * 1024
 
-        with requests.post(odoo_backup_url, data=data, stream=True) as response:
+        with requests.post(odoo_backup_url, data=data, stream=True, timeout=14400) as response:
             response.raise_for_status()
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{FORMAT}") as tmp:
                 local_path = tmp.name
