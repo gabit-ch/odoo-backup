@@ -42,6 +42,9 @@ odoo-backup is a stateless docker service that creates rotating backups of odoo 
 * ```SFTP_SOCK_BUF_KB``` **optional, socket send/recv buffer size in KiB (default: 1024)
 
 ## Releases
+### 1.0.7
+* Fix remove timeout for backup requests
+
 ### 1.0.6
 * Add additional supported backup formats
 * Replace pysftp with paramiko
