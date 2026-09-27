@@ -5,6 +5,8 @@
 [tool.ruff]
 target-version = "py314"
 line-length = 120
+# The end-to-end driver runs on the runner's system Python (Ubuntu 24.04: 3.12) and on developer machines.
+per-file-target-version = { "tests/e2e/run_e2e.py" = "py312" }
 
 [tool.ruff.lint]
 select = [
@@ -42,9 +44,8 @@ ignore = [
 ]
 # The HTML is a verbatim copy of Odoo's database manager markup inside a triple-quoted string.
 "tests/http_stub.py" = ["E501"]
-# The end-to-end driver runs the docker and ssh-keygen CLIs from PATH and talks to the Odoo it
-# started itself on 127.0.0.1.
-"tests/e2e/**" = ["S607", "S310"]
+# The end-to-end driver runs the docker and ssh-keygen CLIs from PATH.
+"tests/e2e/**" = ["S607"]
 
 [tool.coverage.run]
 branch = true
