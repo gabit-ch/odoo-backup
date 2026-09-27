@@ -1,0 +1,19 @@
+# The image only needs requirements.txt, backup.py and odoo_backup/ (see the COPY lines in the
+# Dockerfile). Everything else stays out of the build context, above all local environments,
+# IDE state and anything that could hold secrets. The tests are not part of the image: CI mounts
+# them read-only into the built image.
+.git
+.github
+.idea
+.venv
+venv
+app
+tests
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store
+.env
+*.env
+*.log
+Dockerfile
+.dockerignore

@@ -1,5 +1,16 @@
-paramiko==4.0.0
-python-dateutil==2.9.0
-pytz==2025.2
-requests==2.32.5
-schedule==1.2.2
+# Exact and complete runtime dependency closure of odoo-backup (Python 3.14).
+# Install with:  pip install --only-binary=:all: --no-deps -r requirements.txt && pip check
+# Every package ships wheels for musllinux (the Alpine image, amd64 and arm64) and manylinux,
+# so no compiler is needed. Dependabot keeps the pins current (see .github/dependabot.yml).
+paramiko==5.0.0
+bcrypt==5.0.0                # via paramiko
+cryptography==50.0.1         # via paramiko
+cffi==2.1.1                  # via cryptography, pynacl
+pycparser==3.0               # via cffi
+invoke==3.0.3                # via paramiko
+pynacl==1.6.2                # via paramiko
+requests==2.34.2
+certifi==2026.7.22           # via requests
+charset-normalizer==3.5.1    # via requests
+idna==3.20                   # via requests
+urllib3==2.8.0               # via requests
