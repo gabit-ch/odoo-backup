@@ -1,10 +1,13 @@
 version: 2
 updates:
-  # requirements.txt pins the complete closure; review that the "# via" comments still hold.
+  # requirements.txt (runtime) and requirements-dev.txt (ruff, coverage, pip-audit) pin their
+  # complete closures; review that the "# via" comments still hold.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7 # security updates are not delayed
     groups:
       python-dependencies:
         patterns: ["*"]
@@ -18,11 +21,23 @@ updates:
       docker-base-image:
         patterns: ["*"]
 
-  # The workflow pins every action to a commit SHA with a "# vX.Y.Z" comment.
+  # PostgreSQL, Odoo and SFTP images of the end-to-end test, pinned by digest.
+  - package-ecosystem: "docker-compose"
+    directory: "/tests/e2e"
+    schedule:
+      interval: "weekly"
+    groups:
+      e2e-images:
+        patterns: ["*"]
+
+  # The workflows pin every action to a commit SHA with a "# vX.Y.Z" comment. The tool binaries
+  # in ci.yml (actionlint, hadolint, shellcheck, grype) are pinned by SHA-256 and updated by hand.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
         patterns: ["*"]

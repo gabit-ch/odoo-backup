@@ -1,0 +1,358 @@
+# The one build, test and publish pipeline of odoo-backup.
+#
+# lint, test and audit run in parallel; image builds the amd64 image and runs the unit tests
+# inside it; scan and e2e test that image; publish pushes the multi-arch image to Docker Hub, only
+# for a release tag (2.0.0, never 0.x) and only when every other job passed.
+#
+# Every action is pinned to a commit SHA (verified through the GitHub API) with its version in a
+# comment; Dependabot keeps them current. The tool binaries downloaded in lint and scan are
+# pinned by version and SHA-256 (from the projects' official release checksums) and must be
+# updated by hand.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  # Superseded branch and pull request runs are cancelled; a release tag always runs to the end.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  IMAGE_NAME: gabitch/odoo-backup
+  TEST_IMAGE: odoo-backup:ci
+  PYTHON_VERSION: '3.14'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_NO_CACHE_DIR: '1'
+
+jobs:
+  lint:
+    name: Lint (ruff, actionlint, hadolint, shellcheck)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      HADOLINT_VERSION: 2.15.1
+      HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+      SHELLCHECK_VERSION: 0.11.0
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the pinned development tools
+        run: |
+          python -m pip install --only-binary=:all: --no-deps -r requirements-dev.txt
+          python -m pip check
+
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+      - name: ruff format --check
+        run: ruff format --check --diff .
+
+      - name: Install actionlint, hadolint and shellcheck (checksum-verified release binaries)
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p bin
+          curl -fsSLo actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf actionlint.tar.gz -C bin actionlint
+          curl -fsSLo bin/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  bin/hadolint" | sha256sum --check --strict
+          curl -fsSLo shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum --check --strict
+          tar -xJf shellcheck.tar.xz --strip-components=1 -C bin "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          chmod +x bin/*
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+
+      - name: actionlint (workflows; shellcheck checks the run steps)
+        run: actionlint -color
+
+      - name: hadolint
+        run: hadolint Dockerfile
+
+      - name: shellcheck (shell scripts)
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "No shell scripts in the repository; actionlint checked the workflow run steps with shellcheck."
+            exit 0
+          fi
+          shellcheck "${scripts[@]}"
+
+  test:
+    name: Unit tests and coverage (Python 3.14)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the pinned runtime and development dependencies
+        run: |
+          python -m pip install --only-binary=:all: --no-deps -r requirements-dev.txt
+          python -m pip check
+
+      - name: Run the unit tests under coverage
+        run: python -X dev -W error::DeprecationWarning -m coverage run -m unittest discover -s tests -t . -v
+
+      - name: Coverage summary and XML report
+        run: |
+          {
+            echo "## Unit test coverage (branches, odoo_backup)"
+            python -m coverage report --format=markdown --fail-under=0
+          } >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage xml --fail-under=0 -o coverage.xml
+
+      - name: Enforce the coverage threshold (fail_under in pyproject.toml)
+        run: python -m coverage report
+
+      - name: Upload the coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --only-binary=:all: --no-deps -r requirements-dev.txt
+          python -m pip check
+
+      # Both files pin their complete closure, so no resolution is needed (--no-deps --disable-pip).
+      # Any known vulnerability fails the job.
+      - name: Audit the runtime and development dependencies
+        run: >-
+          pip-audit --requirement requirements.txt --requirement requirements-dev.txt
+          --no-deps --disable-pip --strict --progress-spinner off
+
+  image:
+    name: Build and test the image (linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the amd64 image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          sbom: false
+          tags: ${{ env.TEST_IMAGE }}
+
+      - name: Run the unit tests inside the image (no network, tests mounted read-only)
+        run: >-
+          docker run --rm --network none
+          --volume "${GITHUB_WORKSPACE}/tests:/usr/app/src/tests:ro"
+          "${TEST_IMAGE}"
+          python -X dev -W error::DeprecationWarning -m unittest discover -s tests -t . -v
+
+      - name: Save the image for the scan and end-to-end jobs
+        run: docker image save "${TEST_IMAGE}" --output "${RUNNER_TEMP}/odoo-backup-image.tar"
+
+      - name: Upload the image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: odoo-backup-image
+          path: ${{ runner.temp }}/odoo-backup-image.tar
+          if-no-files-found: error
+          retention-days: 3
+
+  scan:
+    # A job of its own: the only job with security-events: write runs no project code.
+    name: Vulnerability scan of the image (Grype)
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # upload the SARIF report to code scanning
+    env:
+      GRYPE_VERSION: 0.119.0
+      GRYPE_SHA256: 3fa2dc4b924621ab65404cf08d0b8438d896d80ab949c9d5a4ca283c36004c9b
+      GRYPE_CHECK_FOR_APP_UPDATE: 'false'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: odoo-backup-image
+          path: ${{ runner.temp }}
+
+      - name: Install Grype (checksum-verified release binary)
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p bin
+          curl -fsSLo grype.tar.gz \
+            "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+          echo "${GRYPE_SHA256}  grype.tar.gz" | sha256sum --check --strict
+          tar -xzf grype.tar.gz -C bin grype
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+
+      - name: Scan the image (fails on fixable High and Critical vulnerabilities)
+        run: >-
+          grype "docker-archive:${RUNNER_TEMP}/odoo-backup-image.tar"
+          --only-fixed --fail-on high
+          --output table --output sarif=grype.sarif
+
+      # Fork pull requests get a read-only token; their results are in the job log only.
+      - name: Upload the SARIF report to code scanning
+        if: >-
+          !cancelled() && hashFiles('grype.sarif') != '' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: grype.sarif
+          category: grype-image
+
+  e2e:
+    name: End-to-end test (Odoo 19, PostgreSQL 18, SFTP)
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: odoo-backup-image
+          path: ${{ runner.temp }}
+
+      - name: Load the image
+        run: docker image load --input "${RUNNER_TEMP}/odoo-backup-image.tar"
+
+      # Standard library only: the runner's system Python is enough. The driver generates every
+      # credential and SSH host key it uses.
+      - name: Run the end-to-end scenarios
+        run: python3 tests/e2e/run_e2e.py --image "${TEST_IMAGE}" --work-dir "${RUNNER_TEMP}/e2e"
+
+      - name: Upload the logs (docker compose logs, every backup container's output)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-logs
+          path: ${{ runner.temp }}/e2e/logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    name: Publish the multi-arch image to Docker Hub
+    needs: [lint, test, audit, image, scan, e2e]
+    # Only release tags are pushed, and never 0.x tags.
+    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/0.')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The repository secrets DOCKER_USERNAME/DOCKER_PASSWORD keep working; the environment allows
+    # protection rules (e.g. tag-only deployments, reviewers) and environment-scoped secrets.
+    environment:
+      name: docker-hub
+      url: https://hub.docker.com/r/gabitch/odoo-backup/tags
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # 2.0.0 -> tags 2.0.0, 2.0 and (metadata-action default flavor latest=auto) latest.
+      - name: Docker metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push the multi-arch image with provenance and SBOM
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}

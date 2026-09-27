@@ -1,5 +1,8 @@
 # odoo-backup
 
+[![CI](https://github.com/gabit-ch/odoo-backup/actions/workflows/ci.yml/badge.svg)](https://github.com/gabit-ch/odoo-backup/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/gabit-ch/odoo-backup/actions/workflows/codeql.yml/badge.svg)](https://github.com/gabit-ch/odoo-backup/actions/workflows/codeql.yml)
+
 ## What is odoo-backup?
 odoo-backup is a small Docker service that takes scheduled backups of an Odoo database through
 Odoo's database manager, verifies every archive while it downloads, uploads it to any SFTP server
@@ -370,17 +373,66 @@ protects a scheduled run from a manual `--once`.
   every attempt starts from byte 0.
 - The file name contract `odoo{server_serie}-{db}-{YYYYmmdd-HHMMSS}.{format}` is unchanged.
 
-## Development
+## Development and CI
+
+Set up a virtual environment with the pinned runtime and development dependencies
+(`requirements-dev.txt` includes `requirements.txt`; both pin their complete closure):
 
 ```sh
 python3.14 -m venv .venv
-.venv/bin/pip install --only-binary=:all: --no-deps -r requirements.txt && .venv/bin/pip check
-.venv/bin/python -X dev -W error::DeprecationWarning -m unittest discover -s tests -t . -v
+.venv/bin/pip install --only-binary=:all: --no-deps -r requirements-dev.txt && .venv/bin/pip check
 ```
 
-The tests use only the standard library plus local stubs (an Odoo HTTP stub and an in-process
-paramiko SFTP server on 127.0.0.1); they need no network. CI runs them on Python 3.14 and again
-inside the built image with `--network none` before the multi-arch image is pushed.
+Unit tests, with branch coverage (the threshold `fail_under` is in `pyproject.toml`):
+
+```sh
+.venv/bin/python -X dev -W error::DeprecationWarning -m coverage run -m unittest discover -s tests -t . -v
+.venv/bin/python -m coverage report
+```
+
+The unit tests use only the standard library plus local stubs (an Odoo HTTP stub and an
+in-process paramiko SFTP server on 127.0.0.1); they need no network.
+
+Lint, formatting and the dependency audit (`pyproject.toml` holds the ruff configuration):
+
+```sh
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
+.venv/bin/pip-audit -r requirements.txt -r requirements-dev.txt --no-deps --disable-pip --strict
+```
+
+End-to-end test against real Odoo 19, PostgreSQL 18 and an OpenSSH SFTP server (needs Docker with
+the compose plugin, `ssh-keygen` and Python 3.12 or newer; it downloads the images pinned in
+`tests/e2e/docker-compose.yml` and takes a few minutes):
+
+```sh
+docker build -t odoo-backup:e2e .
+python3 tests/e2e/run_e2e.py --image odoo-backup:e2e
+```
+
+The driver generates every password and SSH host key it uses, creates a database with a binary
+attachment, runs the image with `--check`, `--once`, `--once --database-only`, `--retention-plan`
+and `--health`, checks the failures with a wrong master password and a wrong host key, the
+retention on a seeded directory (dry run and real run) and restores the backup through Odoo's
+database manager. `--keep` leaves the containers running, the logs (secrets redacted) are in
+`<work dir>/logs`. The SFTP test image (`atmoz/sftp:debian`) is amd64-only and runs emulated on
+arm64 machines.
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push, pull request and release tag:
+
+| Job | What it checks |
+|---|---|
+| `lint` | `ruff check`, `ruff format --check`, actionlint (with shellcheck for the run steps), hadolint, shellcheck |
+| `test` | the unit tests under coverage on Python 3.14 (`-X dev`, deprecation warnings are errors), coverage summary and `coverage.xml` |
+| `audit` | `pip-audit` of `requirements.txt` and `requirements-dev.txt`; any known vulnerability fails |
+| `image` | builds the linux/amd64 image and runs the unit tests inside it with `--network none` |
+| `scan` | Grype scan of that image; fixable High or Critical vulnerabilities fail, the SARIF report goes to code scanning |
+| `e2e` | `tests/e2e/run_e2e.py` against that image |
+| `publish` | release tags `X.Y.Z` (never `0.x`) only, after all other jobs: multi-arch image (linux/amd64, linux/arm64) with provenance and SBOM to Docker Hub as `X.Y.Z`, `X.Y` and `latest` |
+
+`.github/workflows/codeql.yml` runs CodeQL on pushes to `main`, pull requests into `main` and
+weekly. Dependabot updates the Python pins, the base image digest, the end-to-end images and the
+actions; the checksums of the tool binaries in `ci.yml` (actionlint, hadolint, shellcheck, Grype)
+are updated by hand.
 
 ## Releases
 
@@ -394,6 +446,7 @@ inside the built image with `--network none` before the multi-arch image is push
 * `--check`, `--once`, `--health` (Docker HEALTHCHECK), heartbeat URL, state file, run lock; with database-only backups, health and heartbeat also watch the daily full backup
 * Fail-fast configuration, Docker secrets via `*_FILE`, secrets never logged
 * Python 3.14, paramiko 5.0.0, requests 2.34.2; image pinned by digest, non-root UID 10001, no build tools; tests and CI
+* CI: ruff, coverage gate, pip-audit, image vulnerability scan, CodeQL and an end-to-end test against Odoo 19, PostgreSQL 18 and OpenSSH before every release
 
 ### 1.0.8
 * Increase timeout to 14400
