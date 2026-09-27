@@ -12,8 +12,8 @@ b. ``--once``: exactly one ``odoo19.0-e2e-<ts>.zip`` in SFTP_PATH with ``dump.sq
 c. ``--once --database-only``: exactly one zip without ``filestore/`` in the db-only directory.
 d. Wrong ODOO_MASTER_PWD: ``--check`` exits 1 with a ``FAIL master-password`` line, ``--once``
    fails with Odoo's "Access Denied", the SFTP server is unchanged.
-e. SFTP_HOST_KEY of another key: ``--check`` exits 1 with ``FAIL sftp``, ``--once`` fails and
-   uploads nothing.
+e. SFTP_HOST_KEY of another key: ``--check`` exits 1 with ``FAIL sftp`` and ``--once`` exits 1
+   in the SFTP preflight, both refusing the server's (generated) host key; nothing is uploaded.
 f. Retention on a seeded directory (50 backups over the last 100 days, a foreign file, another
    database's backups and partial uploads): ``--retention-plan``, then ``RETENTION_DRY_RUN=true``
    (nothing deleted), then the real run leaves exactly the expected files.
@@ -27,13 +27,16 @@ Usage::
     python3 tests/e2e/run_e2e.py --image odoo-backup:e2e
 
 Needs Docker with the compose plugin, ``ssh-keygen`` and Python 3.12 or newer (standard library
-only). Exits 0 when every scenario passed, else 1. Every command and its output (secrets
-redacted) is logged to ``<work dir>/logs``; on a failure the compose logs are printed as well.
+only). Exits 0 when every scenario passed, else 1. Every command (logged before it starts) and
+its output (secrets redacted) is written to ``<work dir>/logs``; on a failure the compose logs
+are printed as well. ``--deadline`` bounds the whole run (default 25 minutes): a hang fails the
+run with the logs collected, including the output of a backup container that is still running.
 ``--prepare-only`` generates the work directory (keys, configuration, secrets) without Docker.
 """
 
 import argparse
 import base64
+import contextlib
 import dataclasses
 import datetime
 import email.parser
@@ -47,6 +50,7 @@ import random
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -78,7 +82,13 @@ FOREIGN_FILE = "notes-20250101-010000.txt"
 OTHER_DB = "otherdb"
 
 COMMAND_TIMEOUT = 600  # seconds for one docker command
+CLEANUP_TIMEOUT = 120  # seconds for one command that collects logs or removes containers
+RPC_TIMEOUT = 300  # socket timeout of one HTTP, JSON-RPC or XML-RPC request to Odoo
 ODOO_START_TIMEOUT = 240
+DEFAULT_DEADLINE = 25 * 60  # seconds for the whole run (CI: step timeout 30 min, job 35 min)
+# Every backup container carries this label, so one that outlives its `docker run` (a hang, the
+# deadline) can be found, logged and removed.
+BACKUP_LABEL = "odoo-backup-e2e.backup"
 
 # The backup file name contract (README "Retention"), written independently of odoo_backup so
 # the expectations below do not reuse the code under test.
@@ -95,9 +105,39 @@ class E2EFailure(Exception):
     """A scenario did not behave as expected."""
 
 
+class DeadlineExceeded(Exception):
+    """The run took longer than ``--deadline``.
+
+    Deliberately not an E2EFailure: the wait loops that retry on E2EFailure must not swallow it.
+    """
+
+
 def expect(condition: object, message: str) -> None:
     if not condition:
         raise E2EFailure(message)
+
+
+@contextlib.contextmanager
+def deadline(seconds: float):
+    """Raise DeadlineExceeded in the main thread once ``seconds`` have passed (0: no deadline).
+
+    SIGALRM interrupts whatever blocks: a socket read, ``time.sleep`` or ``subprocess.run`` (which
+    kills its child before the exception propagates). The previous handler is restored on exit.
+    """
+    if seconds <= 0:
+        yield
+        return
+
+    def expired(_signum, _frame) -> None:
+        raise DeadlineExceeded(f"the end-to-end run exceeded its deadline of {seconds:g} s")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 # ------------------------------------------------------------------------------------------
@@ -254,6 +294,17 @@ def parse_check_lines(stdout: str) -> dict[str, tuple[bool, str]]:
     return results
 
 
+def expect_host_key_refusal(text: str, presented: str, what: str) -> None:
+    """``text`` says the service refused an SFTP server that presented the Ed25519 key ``presented``
+    because it matches no SFTP_HOST_KEY entry (not an authentication error, a timeout or the like).
+    """
+    expect(
+        f"the server presented ssh-ed25519 {presented}, which matches none of the" in text
+        and "refusing to authenticate" in text,
+        f"{what} did not refuse the SFTP server for its unpinned host key {presented}:\n{text}",
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class ZipSummary:
     names: tuple[str, ...]
@@ -403,7 +454,10 @@ class Shell:
         self, args: Sequence[str], *, env: Mapping[str, str] | None = None, timeout: float = COMMAND_TIMEOUT
     ) -> Result:
         self.count += 1
+        number = self.count
         started = time.monotonic()
+        # Written before the command starts, so a command that hangs is in the log as well.
+        self._write(f"\n### [{number}] {self.redact(' '.join(args))}\n")
         try:
             completed = subprocess.run(
                 list(args),
@@ -416,13 +470,21 @@ class Shell:
             result = Result(completed.returncode, completed.stdout, completed.stderr)
         except subprocess.TimeoutExpired as exc:
             result = Result(-1, _text(exc.stdout), _text(exc.stderr) + f"\nTIMEOUT after {timeout} s")
-        with self.log.open("a") as fh:
-            fh.write(
-                f"\n### [{self.count}] {self.redact(' '.join(args))}\n"
-                f"### exit {result.code} after {time.monotonic() - started:.1f} s\n"
-                f"--- stdout\n{self.redact(result.stdout)}--- stderr\n{self.redact(result.stderr)}"
+        except BaseException as exc:  # the deadline, Ctrl-C: subprocess.run has killed the command
+            self._write(
+                f"### [{number}] interrupted after {time.monotonic() - started:.1f} s: "
+                f"{type(exc).__name__}: {self.redact(str(exc))}\n"
             )
+            raise
+        self._write(
+            f"### [{number}] exit {result.code} after {time.monotonic() - started:.1f} s\n"
+            f"--- stdout\n{self.redact(result.stdout)}--- stderr\n{self.redact(result.stderr)}"
+        )
         return result
+
+    def _write(self, text: str) -> None:
+        with self.log.open("a") as fh:
+            fh.write(text)
 
     def must(self, args: Sequence[str], **kwargs) -> Result:
         result = self.run(args, **kwargs)
@@ -450,23 +512,65 @@ class Compose:
 
     def logs(self) -> str:
         result = self.shell.run(
-            ["docker", "compose", "--file", str(COMPOSE_FILE), "logs", "--no-color", "--timestamps"]
+            ["docker", "compose", "--file", str(COMPOSE_FILE), "logs", "--no-color", "--timestamps"],
+            timeout=CLEANUP_TIMEOUT,
         )
         return self.shell.redact(result.output)
 
     def down(self) -> None:
-        self.shell.run(["docker", "compose", "--file", str(COMPOSE_FILE), "down", "--volumes", "--remove-orphans"])
+        self.shell.run(
+            ["docker", "compose", "--file", str(COMPOSE_FILE), "down", "--volumes", "--remove-orphans"],
+            timeout=CLEANUP_TIMEOUT,
+        )
+
+
+def remove_backup_containers(shell: Shell, log_dir: pathlib.Path) -> int:
+    """Save the output of every backup container still present (it outlived its `docker run`)
+    to ``log_dir/backup-container-<id>.log`` and remove it; returns how many were found."""
+    listed = shell.run(
+        ["docker", "ps", "--all", "--quiet", "--no-trunc", "--filter", f"label={BACKUP_LABEL}"],
+        timeout=CLEANUP_TIMEOUT,
+    )
+    containers = listed.stdout.split() if listed.code == 0 else []
+    for container in containers:
+        output = shell.run(["docker", "logs", "--timestamps", container], timeout=CLEANUP_TIMEOUT)
+        (log_dir / f"backup-container-{container[:12]}.log").write_text(shell.redact(output.output))
+        shell.run(["docker", "rm", "--force", container], timeout=CLEANUP_TIMEOUT)
+    return len(containers)
+
+
+class TimeoutTransport(xmlrpc.client.Transport):
+    """XML-RPC over HTTP with a socket timeout (xmlrpc.client's own transport waits forever)."""
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__()
+        self.timeout = timeout
+
+    def make_connection(self, host):
+        connection = super().make_connection(host)
+        connection.timeout = self.timeout  # used when the connection opens its socket
+        return connection
 
 
 class OdooAPI:
-    """The Odoo endpoints the driver needs, on 127.0.0.1:<port> (no redirects are followed)."""
+    """The Odoo endpoints the driver needs, on 127.0.0.1:<port> (no redirects are followed).
 
-    def __init__(self, port: int) -> None:
+    Every request has a socket timeout, so an Odoo that accepts a connection but never answers
+    fails the run instead of blocking it.
+    """
+
+    def __init__(self, port: int, *, timeout: float = RPC_TIMEOUT) -> None:
         self.port = port
         self.base = f"http://127.0.0.1:{port}"
+        self.timeout = timeout
+
+    def _proxy(self, endpoint: str) -> xmlrpc.client.ServerProxy:
+        return xmlrpc.client.ServerProxy(
+            f"{self.base}/xmlrpc/2/{endpoint}", transport=TimeoutTransport(self.timeout), allow_none=True
+        )
 
     def request(self, method: str, path: str, body: bytes = b"", headers: Mapping[str, str] | None = None):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=300)
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
         try:
             connection.request(method, path, body=body, headers=dict(headers or {}))
             response = connection.getresponse()
@@ -496,11 +600,11 @@ class OdooAPI:
         raise E2EFailure(f"Odoo did not answer /web/webclient/version_info within {timeout} s ({last_error})")
 
     def execute(self, db: str, uid: int, password: str, model: str, method: str, *args, **kwargs):
-        with xmlrpc.client.ServerProxy(f"{self.base}/xmlrpc/2/object", allow_none=True) as proxy:
+        with self._proxy("object") as proxy:
             return proxy.execute_kw(db, uid, password, model, method, list(args), kwargs)
 
     def authenticate(self, db: str, login: str, password: str) -> int:
-        with xmlrpc.client.ServerProxy(f"{self.base}/xmlrpc/2/common", allow_none=True) as proxy:
+        with self._proxy("common") as proxy:
             uid = proxy.authenticate(db, login, password, {})
         expect(isinstance(uid, int) and uid > 0, f"login {login!r} on database {db!r} failed")
         return uid
@@ -524,7 +628,7 @@ class BackupImage:
     def run(self, *args: str, **overrides: str) -> Result:
         env = {**self.base_env, **overrides}
         command = ["docker", "run", "--rm", "--network", NETWORK, "--volume", f"{STATE_VOLUME}:/var/lib/odoo-backup"]
-        command += ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
+        command += ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", BACKUP_LABEL]
         for key in sorted(env):
             command += ["--env", key]  # the value comes from the environment, never from the command line
         return self.shell.run([*command, self.image, "python", "backup.py", *args], env=env)
@@ -650,9 +754,15 @@ def scenario_e_wrong_host_key(ctx: Context) -> None:
     check = ctx.backup.run("--check", SFTP_HOST_KEY=ctx.work.foreign_fingerprint)
     expect(check.code == 1, f"--check with a wrong host key: exit {check.code}, expected 1\n{check.output}")
     lines = parse_check_lines(check.stdout)
-    expect(lines.get("sftp", (True, ""))[0] is False, f"no FAIL sftp line: {lines}")
+    sftp_ok, sftp_detail = lines.get("sftp", (True, ""))
+    expect(sftp_ok is False, f"no FAIL sftp line: {lines}")
+    # The server presents its generated Ed25519 key, which the pinned foreign fingerprint rejects.
+    expect_host_key_refusal(sftp_detail, ctx.work.host_key_fingerprint, "--check")
     once = ctx.backup.run("--once", SFTP_HOST_KEY=ctx.work.foreign_fingerprint)
-    expect(once.code != 0, "--once with a wrong host key succeeded")
+    # Exit 1 is a failed run; 2 would be a configuration error, which is not what this scenario tests.
+    expect(once.code == 1, f"--once with a wrong host key: exit {once.code}, expected 1\n{once.output}")
+    expect_host_key_refusal(once.output, ctx.work.host_key_fingerprint, "--once")
+    expect("stage=sftp-preflight" in once.output, f"--once did not fail in the SFTP preflight:\n{once.output}")
     expect(snapshot(ctx.work.sftp_data) == before, "a run with a wrong host key changed the SFTP server")
 
 
@@ -764,10 +874,19 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--work-dir", type=pathlib.Path, help="directory for keys, configuration and logs")
     parser.add_argument("--odoo-port", type=int, default=18069, help="host port for Odoo on 127.0.0.1")
     parser.add_argument("--keep", action="store_true", help="leave the containers running afterwards")
+    parser.add_argument(
+        "--deadline",
+        type=float,
+        default=DEFAULT_DEADLINE,
+        metavar="SECONDS",
+        help=f"fail the run after this many seconds, logs collected (default {DEFAULT_DEADLINE}; 0: no deadline)",
+    )
     parser.add_argument("--prepare-only", action="store_true", help="only generate the work directory")
     args = parser.parse_args(argv)
     if not args.image and not args.prepare_only:
         parser.error("--image is required")
+    if args.deadline < 0:
+        parser.error("--deadline must not be negative")
     return args
 
 
@@ -815,29 +934,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     ctx = Context(work, secret, OdooAPI(args.odoo_port), backup)
     failed = True
     try:
-        compose.down()  # leftovers of an aborted local run
-        shell.run(["docker", "volume", "rm", "--force", STATE_VOLUME])
-        step("Starting PostgreSQL and the SFTP server")
-        compose("up", "--detach", "--wait", "--wait-timeout", "120", "db", "sftp")
-        step(f"Creating database {DB_NAME!r} (odoo -i base, no demo data)")
-        compose("run", "--rm", "-T", "odoo", "odoo", "--database", DB_NAME, "--init", "base", "--stop-after-init")
-        step("Starting Odoo")
-        compose("up", "--detach", "--wait", "--wait-timeout", str(ODOO_START_TIMEOUT), "odoo")
-        serie = ctx.odoo.wait_until_ready(ODOO_START_TIMEOUT)
-        expect(serie == ODOO_SERIE, f"Odoo reports server_serie {serie!r}, expected {ODOO_SERIE!r}")
-        prepare_odoo(ctx)
-        for title, scenario in SCENARIOS:
-            step(f"Scenario {title}")
-            scenario(ctx)
+        # The deadline covers the run, not the log collection below: a hang still leaves its logs.
+        with deadline(args.deadline):
+            # Leftovers of an aborted local run.
+            remove_backup_containers(shell, work.logs)
+            compose.down()
+            shell.run(["docker", "volume", "rm", "--force", STATE_VOLUME])
+            step("Starting PostgreSQL and the SFTP server")
+            compose("up", "--detach", "--wait", "--wait-timeout", "120", "db", "sftp")
+            step(f"Creating database {DB_NAME!r} (odoo -i base, no demo data)")
+            compose("run", "--rm", "-T", "odoo", "odoo", "--database", DB_NAME, "--init", "base", "--stop-after-init")
+            step("Starting Odoo")
+            compose("up", "--detach", "--wait", "--wait-timeout", str(ODOO_START_TIMEOUT), "odoo")
+            serie = ctx.odoo.wait_until_ready(ODOO_START_TIMEOUT)
+            expect(serie == ODOO_SERIE, f"Odoo reports server_serie {serie!r}, expected {ODOO_SERIE!r}")
+            prepare_odoo(ctx)
+            for title, scenario in SCENARIOS:
+                step(f"Scenario {title}")
+                scenario(ctx)
         failed = False
         print("\nAll end-to-end scenarios passed.", flush=True)
-    except E2EFailure as exc:
+    except (E2EFailure, DeadlineExceeded) as exc:
         print(f"\nFAILED: {shell.redact(str(exc))}", file=sys.stderr, flush=True)
     except Exception:
         print(
             f"\nFAILED with an unexpected error:\n{shell.redact(traceback.format_exc())}", file=sys.stderr, flush=True
         )
     finally:
+        if not args.keep:
+            # Before the compose logs: a backup container that outlived its `docker run` (a hang,
+            # the deadline) still holds the output that explains it.
+            leftover = remove_backup_containers(shell, work.logs)
+            if leftover:
+                print(f"Saved and removed {leftover} backup container(s) that were still running", flush=True)
         logs = compose.logs()
         (work.logs / "compose.log").write_text(logs)
         if failed:
@@ -847,10 +976,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 "Containers kept running (--keep); remove them with: "
                 f"docker compose --project-name odoo-backup-e2e down --volumes && docker volume rm {STATE_VOLUME}"
+                f" (a backup container still running: docker ps --all --filter label={BACKUP_LABEL})"
             )
         else:
             compose.down()
-            shell.run(["docker", "volume", "rm", "--force", STATE_VOLUME])
+            shell.run(["docker", "volume", "rm", "--force", STATE_VOLUME], timeout=CLEANUP_TIMEOUT)
     return 1 if failed else 0
 
 

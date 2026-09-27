@@ -26,12 +26,20 @@ updates:
     directory: "/tests/e2e"
     schedule:
       interval: "weekly"
+    ignore:
+      # Major versions are bumped by hand, together: the PostgreSQL server must not be newer than
+      # the pg_dump client in the Odoo image, and the test targets Odoo 19.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "odoo"
+        update-types: ["version-update:semver-major"]
     groups:
       e2e-images:
         patterns: ["*"]
 
-  # The workflows pin every action to a commit SHA with a "# vX.Y.Z" comment. The tool binaries
-  # in ci.yml (actionlint, hadolint, shellcheck, grype) are pinned by SHA-256 and updated by hand.
+  # The workflows pin every action to a commit SHA with a "# vX.Y.Z" comment. Updated by hand:
+  # the tool binaries in ci.yml (actionlint, hadolint, shellcheck, grype; pinned by SHA-256) and
+  # the BuildKit and binfmt images (BUILDKIT_IMAGE, BINFMT_IMAGE; pinned by digest).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

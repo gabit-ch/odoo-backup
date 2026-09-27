@@ -1,13 +1,16 @@
 # The one build, test and publish pipeline of odoo-backup.
 #
-# lint, test and audit run in parallel; image builds the amd64 image and runs the unit tests
-# inside it; scan and e2e test that image; publish pushes the multi-arch image to Docker Hub, only
-# for a release tag (2.0.0, never 0.x) and only when every other job passed.
+# lint, test and audit run in parallel; image builds the linux/amd64 and linux/arm64 images, each
+# natively on a runner of its architecture, and runs the unit tests inside them; scan checks both
+# images, e2e tests the amd64 one; publish pushes the multi-arch image to Docker Hub, only for a
+# pushed release tag (2.0.0, never 0.x) and only when every other job passed.
 #
 # Every action is pinned to a commit SHA (verified through the GitHub API) with its version in a
-# comment; Dependabot keeps them current. The tool binaries downloaded in lint and scan are
-# pinned by version and SHA-256 (from the projects' official release checksums) and must be
-# updated by hand.
+# comment; Dependabot keeps them current. Dependabot does not track the following pins, which
+# must be updated by hand: the tool binaries downloaded in lint and scan (version and SHA-256 from
+# the projects' official release checksums) and the BuildKit and binfmt (QEMU) images, which
+# setup-buildx-action and setup-qemu-action would otherwise pull by a mutable tag (index digest
+# resolved from Docker Hub).
 name: CI
 
 on:
@@ -30,6 +33,9 @@ env:
   PYTHON_VERSION: '3.14'
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
   PIP_NO_CACHE_DIR: '1'
+  # The BuildKit daemon of every image build (image and publish): buildx's default
+  # moby/buildkit:buildx-stable-1, which was v0.32.2 on 2026-09-27.
+  BUILDKIT_IMAGE: moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
 
 jobs:
   lint:
@@ -174,11 +180,21 @@ jobs:
           --no-deps --disable-pip --strict --progress-spinner off
 
   image:
-    name: Build and test the image (linux/amd64)
-    runs-on: ubuntu-24.04
+    # Every platform that publish pushes is built and tested here first, natively (no emulation),
+    # so a change that breaks only one architecture fails before a release tag is pushed.
+    name: Build and test the image (linux/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm # GitHub-hosted arm64 runner, free for public repositories
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,12 +203,14 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
-      - name: Build the amd64 image
+      - name: Build the ${{ matrix.arch }} image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           push: false
           provenance: false
@@ -212,20 +230,25 @@ jobs:
       - name: Upload the image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: odoo-backup-image
+          name: odoo-backup-image-${{ matrix.arch }}
           path: ${{ runner.temp }}/odoo-backup-image.tar
           if-no-files-found: error
           retention-days: 3
 
   scan:
-    # A job of its own: the only job with security-events: write runs no project code.
-    name: Vulnerability scan of the image (Grype)
+    # A job of its own: the only job with security-events: write runs no project code. Grype reads
+    # the image files, so the amd64 binary scans the arm64 image as well.
+    name: Vulnerability scan of the image (Grype, linux/${{ matrix.arch }})
     needs: image
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
       security-events: write # upload the SARIF report to code scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     env:
       GRYPE_VERSION: 0.119.0
       GRYPE_SHA256: 3fa2dc4b924621ab65404cf08d0b8438d896d80ab949c9d5a4ca283c36004c9b
@@ -239,7 +262,7 @@ jobs:
       - name: Download the image
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: odoo-backup-image
+          name: odoo-backup-image-${{ matrix.arch }}
           path: ${{ runner.temp }}
 
       - name: Install Grype (checksum-verified release binary)
@@ -258,21 +281,25 @@ jobs:
           --only-fixed --fail-on high
           --output table --output sarif=grype.sarif
 
-      # Fork pull requests get a read-only token; their results are in the job log only.
+      # Fork pull requests get a read-only token; their results are in the job log only. The
+      # previous step alone decides about vulnerabilities: a failed upload (code scanning API,
+      # quota, permissions) is a warning, it must not block a release.
       - name: Upload the SARIF report to code scanning
         if: >-
           !cancelled() && hashFiles('grype.sarif') != '' &&
           (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: grype.sarif
-          category: grype-image
+          category: grype-image-${{ matrix.arch }}
 
   e2e:
+    # amd64 only: the SFTP test image (atmoz/sftp) is published for amd64 only.
     name: End-to-end test (Odoo 19, PostgreSQL 18, SFTP)
     needs: image
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:
@@ -284,19 +311,22 @@ jobs:
       - name: Download the image
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: odoo-backup-image
+          name: odoo-backup-image-amd64
           path: ${{ runner.temp }}
 
       - name: Load the image
         run: docker image load --input "${RUNNER_TEMP}/odoo-backup-image.tar"
 
       # Standard library only: the runner's system Python is enough. The driver generates every
-      # credential and SSH host key it uses.
+      # credential and SSH host key it uses. A hang fails at the driver's own deadline (25 min),
+      # which still collects the logs; the step timeout is the backstop and, unlike the job
+      # timeout (a cancellation), it is a failure, so the logs below are uploaded either way.
       - name: Run the end-to-end scenarios
-        run: python3 tests/e2e/run_e2e.py --image "${TEST_IMAGE}" --work-dir "${RUNNER_TEMP}/e2e"
+        timeout-minutes: 30
+        run: python3 tests/e2e/run_e2e.py --image "${TEST_IMAGE}" --work-dir "${RUNNER_TEMP}/e2e" --deadline 1500
 
       - name: Upload the logs (docker compose logs, every backup container's output)
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-logs
@@ -307,8 +337,11 @@ jobs:
   publish:
     name: Publish the multi-arch image to Docker Hub
     needs: [lint, test, audit, image, scan, e2e]
-    # Only release tags are pushed, and never 0.x tags.
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/0.')
+    # Only pushed release tags (the X.Y.Z filter above), never 0.x tags. A manual run
+    # (workflow_dispatch) on a tag ref does not publish: the tag filter does not apply to it.
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') &&
+      !startsWith(github.ref, 'refs/tags/0.')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     # The repository secrets DOCKER_USERNAME/DOCKER_PASSWORD keep working; the environment allows
@@ -318,17 +351,27 @@ jobs:
       url: https://hub.docker.com/r/gabitch/odoo-backup/tags
     permissions:
       contents: read
+    env:
+      # setup-qemu-action's default tonistiigi/binfmt:latest, which was qemu-v10.2.3 on 2026-09-27.
+      # It runs privileged and installs the emulator that builds the arm64 image.
+      BINFMT_IMAGE: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Set up QEMU
+      - name: Set up QEMU (arm64 emulation for the multi-arch build)
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: ${{ env.BINFMT_IMAGE }}
+          platforms: arm64
+          cache-image: false # always pulled by digest, never restored from the Actions cache
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
       # 2.0.0 -> tags 2.0.0, 2.0 and (metadata-action default flavor latest=auto) latest.
       - name: Docker metadata

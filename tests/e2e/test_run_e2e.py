@@ -1,22 +1,31 @@
-"""Unit tests of the pure parts of the end-to-end driver (no Docker, no network).
+"""Unit tests of the end-to-end driver without Docker (only 127.0.0.1 and local subprocesses).
 
 The retention expectation of scenario (f) is an independent re-statement of the README rules for
 BACKUP_TIME=00:00; these tests pin it to odoo_backup.retention.plan_retention() on many generated
-directories, so a wrong expectation cannot hide a retention defect (or report a false one).
+directories, so a wrong expectation cannot hide a retention defect (or report a false one). The
+host key refusal of scenario (e) is checked against the service's own mismatch message.
 """
 
+import contextlib
 import datetime
 import io
 import json
+import os
 import pathlib
 import random
+import signal
+import socket
+import sys
 import tempfile
+import time
 import unittest
 import zipfile
 
 from odoo_backup.retention import RetentionPolicy, parse_backup_name, plan_retention
+from odoo_backup.sftp import HostKeyMismatchError, SFTPConnection, fingerprint
 from tests.e2e import run_e2e
-from tests.e2e.run_e2e import DB_NAME, E2EFailure
+from tests.e2e.run_e2e import DB_NAME, DeadlineExceeded, E2EFailure
+from tests.sftp_stub import generate_ed25519_key
 
 MIDNIGHT = datetime.time(0, 0)
 
@@ -144,6 +153,180 @@ class CheckLinesTest(unittest.TestCase):
     def test_rejects_other_lines(self):
         with self.assertRaises(E2EFailure):
             run_e2e.parse_check_lines("OK config: fine\nTraceback (most recent call last):\n")
+
+
+class HostKeyRefusalTest(unittest.TestCase):
+    def setUp(self):
+        self.presented, self.pinned = generate_ed25519_key(), generate_ed25519_key()
+        # The service's own message for a server key that matches no SFTP_HOST_KEY entry, so the
+        # expectation of scenario (e) cannot drift from what the image prints.
+        connection = SFTPConnection("sftp", 22, "e2e", password="unused", host_keys=(fingerprint(self.pinned),))
+        with self.assertRaises(HostKeyMismatchError) as caught:
+            connection._verify_host_key(self.presented)
+        self.message = str(caught.exception)
+
+    def test_driver_fingerprint_is_the_services(self):
+        line = f"{self.presented.get_name()} {self.presented.get_base64()} comment"
+        self.assertEqual(run_e2e.ssh_fingerprint(line), fingerprint(self.presented))
+
+    def test_accepts_the_refusal_in_a_check_line_and_in_a_log(self):
+        presented = fingerprint(self.presented)
+        run_e2e.expect_host_key_refusal(self.message, presented, "--check")
+        log = f"2026-09-27 ERROR backup failed: run_id=x kind=full stage=sftp-preflight error={self.message} file=-"
+        run_e2e.expect_host_key_refusal(log, presented, "--once")
+
+    def test_rejects_other_failures_and_other_keys(self):
+        presented = fingerprint(self.presented)
+        cases = (
+            (self.message, fingerprint(self.pinned)),  # the refusal names another presented key
+            ("SFTP authentication failed for e2e@sftp:22: Authentication failed.", presented),
+            ("SSH handshake with sftp:22 failed or timed out: timed out", presented),
+            ("", presented),
+        )
+        for text, key in cases:
+            with self.subTest(text=text), self.assertRaises(E2EFailure):
+                run_e2e.expect_host_key_refusal(text, key, "--once")
+
+
+class DeadlineTest(unittest.TestCase):
+    def test_interrupts_a_blocking_call_and_restores_the_signal_state(self):
+        before = signal.getsignal(signal.SIGALRM)
+        started = time.monotonic()
+        with self.assertRaises(DeadlineExceeded), run_e2e.deadline(0.2):
+            time.sleep(10)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+        self.assertIs(signal.getsignal(signal.SIGALRM), before)
+
+    def test_zero_sets_no_timer(self):
+        with run_e2e.deadline(0):
+            self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+
+    def test_no_timer_is_left_after_a_run_within_the_deadline(self):
+        with run_e2e.deadline(30):
+            self.assertGreater(signal.getitimer(signal.ITIMER_REAL)[0], 0)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+
+    def test_parse_args(self):
+        self.assertEqual(run_e2e.parse_args(["--image", "x"]).deadline, run_e2e.DEFAULT_DEADLINE)
+        self.assertEqual(run_e2e.parse_args(["--image", "x", "--deadline", "0"]).deadline, 0)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            run_e2e.parse_args(["--image", "x", "--deadline", "-1"])
+
+
+class ShellTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = pathlib.Path(tmp.name)
+        self.shell = run_e2e.Shell(self.dir, {}, ("s3cret-value",))
+
+    def log(self):
+        return (self.dir / "commands.log").read_text()
+
+    def test_logs_command_exit_and_output_redacted(self):
+        result = self.shell.run([sys.executable, "-c", "print('out s3cret-value')"])
+        self.assertEqual((result.code, result.stdout), (0, "out s3cret-value\n"))
+        log = self.log()
+        self.assertIn("### [1] ", log)
+        self.assertIn("### [1] exit 0 after", log)
+        self.assertIn("out ***", log)
+        self.assertNotIn("s3cret-value", log)
+
+    def test_a_command_interrupted_by_the_deadline_is_logged_and_killed(self):
+        pid_file = self.dir / "child.pid"
+        code = f"import os, pathlib, time; pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)"
+        started = time.monotonic()
+        with self.assertRaises(DeadlineExceeded), run_e2e.deadline(1.5):
+            self.shell.run([sys.executable, "-c", code + "  # s3cret-value"])
+        self.assertLess(time.monotonic() - started, 20)
+        log = self.log()
+        self.assertIn("time.sleep(60)", log)  # the command is in the log although it never finished
+        self.assertIn("### [1] interrupted after", log)
+        self.assertIn("DeadlineExceeded: the end-to-end run exceeded its deadline of 1.5 s", log)
+        self.assertNotIn("s3cret-value", log)
+        with self.assertRaises(ProcessLookupError):  # subprocess.run killed and reaped the child
+            os.kill(int(pid_file.read_text()), 0)
+
+
+class OdooAPITimeoutTest(unittest.TestCase):
+    """An Odoo that accepts connections but never answers must not block the run."""
+
+    def setUp(self):
+        self.server = socket.create_server(("127.0.0.1", 0))  # listens, never accepts or answers
+        self.addCleanup(self.server.close)
+        self.api = run_e2e.OdooAPI(self.server.getsockname()[1], timeout=0.3)
+
+    # The outer deadline turns a missing timeout into a test error instead of a hang.
+
+    def test_xmlrpc_times_out(self):
+        with run_e2e.deadline(10):
+            with self.assertRaises(TimeoutError):
+                self.api.authenticate(DB_NAME, "admin", "unused")
+            with self.assertRaises(TimeoutError):
+                self.api.execute(DB_NAME, 2, "unused", "res.users", "read", [2])
+
+    def test_http_times_out(self):
+        with run_e2e.deadline(10), self.assertRaises(TimeoutError):
+            self.api.jsonrpc("/web/webclient/version_info")
+
+    def test_wait_until_ready_does_not_retry_past_the_deadline(self):
+        # wait_until_ready() retries on errors, E2EFailure included, and gives up after 8 s with
+        # an E2EFailure; the deadline must end it after 1 s instead. The request outlasts the
+        # deadline, so the deadline fires inside the retried call (not in the pause between).
+        api = run_e2e.OdooAPI(self.server.getsockname()[1], timeout=5)
+        with self.assertRaises(DeadlineExceeded), run_e2e.deadline(1.0):
+            api.wait_until_ready(8)
+
+
+class FakeShell:
+    """Records commands; ``answers`` maps the command's first two words after docker to a Result."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.calls = []
+
+    def run(self, args, *, env=None, timeout=None):
+        self.calls.append((list(args), env, timeout))
+        return self.answers.get(tuple(args[1:3]), run_e2e.Result(0, "", ""))
+
+    def redact(self, text):
+        return text.replace("s3cret", "***")
+
+
+class BackupContainerTest(unittest.TestCase):
+    def test_backup_runs_carry_the_label_and_pass_values_by_environment(self):
+        shell = FakeShell({})
+        run_e2e.BackupImage(shell, "odoo-backup:ci", {"SFTP_PASSWORD": "s3cret"}).run("--check", TZ="UTC")
+        ((command, env, _timeout),) = shell.calls
+        self.assertEqual(command[command.index("--label") + 1], run_e2e.BACKUP_LABEL)
+        self.assertEqual(command[-4:], ["odoo-backup:ci", "python", "backup.py", "--check"])
+        self.assertNotIn("s3cret", " ".join(command))
+        self.assertEqual((env["SFTP_PASSWORD"], env["TZ"]), ("s3cret", "UTC"))
+
+    def test_leftover_containers_are_logged_redacted_and_removed(self):
+        ids = ["a" * 64, "b" * 64]
+        shell = FakeShell(
+            {
+                ("ps", "--all"): run_e2e.Result(0, "\n".join(ids) + "\n", ""),
+                ("logs", "--timestamps"): run_e2e.Result(0, "started\n", "hung with s3cret\n"),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(run_e2e.remove_backup_containers(shell, pathlib.Path(tmp)), 2)
+            for container in ids:
+                log = (pathlib.Path(tmp) / f"backup-container-{container[:12]}.log").read_text()
+                self.assertEqual(log, "started\nhung with ***\n")
+        commands = [call[0] for call in shell.calls]
+        self.assertIn(f"label={run_e2e.BACKUP_LABEL}", commands[0])
+        self.assertEqual([c for c in commands if c[1] == "rm"], [["docker", "rm", "--force", c] for c in ids])
+        self.assertTrue(all(call[2] == run_e2e.CLEANUP_TIMEOUT for call in shell.calls))
+
+    def test_nothing_to_remove_when_docker_ps_fails(self):
+        shell = FakeShell({("ps", "--all"): run_e2e.Result(1, "", "Cannot connect to the Docker daemon")})
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(run_e2e.remove_backup_containers(shell, pathlib.Path(tmp)), 0)
+        self.assertEqual(len(shell.calls), 1)
 
 
 class ZipAndHelpersTest(unittest.TestCase):

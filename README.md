@@ -414,8 +414,9 @@ attachment, runs the image with `--check`, `--once`, `--once --database-only`, `
 and `--health`, checks the failures with a wrong master password and a wrong host key, the
 retention on a seeded directory (dry run and real run) and restores the backup through Odoo's
 database manager. `--keep` leaves the containers running, the logs (secrets redacted) are in
-`<work dir>/logs`. The SFTP test image (`atmoz/sftp:debian`) is amd64-only and runs emulated on
-arm64 machines.
+`<work dir>/logs`. `--deadline SECONDS` (default 1500, `0` for none) fails a run that hangs and
+still collects the logs, including the output of a backup container that is still running. The
+SFTP test image (`atmoz/sftp:debian`) is amd64-only and runs emulated on arm64 machines.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on every push, pull request and release tag:
 
@@ -424,15 +425,16 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push, pull request and
 | `lint` | `ruff check`, `ruff format --check`, actionlint (with shellcheck for the run steps), hadolint, shellcheck |
 | `test` | the unit tests under coverage on Python 3.14 (`-X dev`, deprecation warnings are errors), coverage summary and `coverage.xml` |
 | `audit` | `pip-audit` of `requirements.txt` and `requirements-dev.txt`; any known vulnerability fails |
-| `image` | builds the linux/amd64 image and runs the unit tests inside it with `--network none` |
-| `scan` | Grype scan of that image; fixable High or Critical vulnerabilities fail, the SARIF report goes to code scanning |
-| `e2e` | `tests/e2e/run_e2e.py` against that image |
-| `publish` | release tags `X.Y.Z` (never `0.x`) only, after all other jobs: multi-arch image (linux/amd64, linux/arm64) with provenance and SBOM to Docker Hub as `X.Y.Z`, `X.Y` and `latest` |
+| `image` | builds the linux/amd64 and linux/arm64 images, each natively on a runner of its architecture, and runs the unit tests inside them with `--network none` |
+| `scan` | Grype scan of both images; fixable High or Critical vulnerabilities fail, the SARIF reports go to code scanning (a failed upload does not) |
+| `e2e` | `tests/e2e/run_e2e.py` against the amd64 image |
+| `publish` | pushed release tags `X.Y.Z` (never `0.x`) only, after all other jobs: multi-arch image (linux/amd64, linux/arm64) with provenance and SBOM to Docker Hub as `X.Y.Z`, `X.Y` and `latest` |
 
 `.github/workflows/codeql.yml` runs CodeQL on pushes to `main`, pull requests into `main` and
-weekly. Dependabot updates the Python pins, the base image digest, the end-to-end images and the
-actions; the checksums of the tool binaries in `ci.yml` (actionlint, hadolint, shellcheck, Grype)
-are updated by hand.
+weekly. Dependabot updates the Python pins, the base image digest, the end-to-end images (major
+PostgreSQL and Odoo versions excluded: they are bumped by hand, together) and the actions. Updated
+by hand in `ci.yml`: the checksums of the tool binaries (actionlint, hadolint, shellcheck, Grype)
+and the digests of the BuildKit and binfmt (QEMU) images used by the image builds.
 
 ## Releases
 
