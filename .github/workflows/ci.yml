@@ -14,8 +14,10 @@
 name: CI
 
 on:
+  # Branches are tested through their pull request; main and release tags run on push. This avoids
+  # running the pipeline (including the end-to-end test) twice for every pull request commit.
   push:
-    branches: ['**']
+    branches: [main]
     tags: ['[0-9]+.[0-9]+.[0-9]+']
   pull_request:
   workflow_dispatch:
