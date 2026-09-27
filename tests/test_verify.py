@@ -12,6 +12,7 @@ import zlib
 from compression import zstd
 
 from odoo_backup import verify
+from odoo_backup.config import ALLOWED_FORMATS
 from odoo_backup.verify import (
     ArchiveVerificationError,
     StreamVerifier,
@@ -23,7 +24,7 @@ from odoo_backup.verify import (
 from tests.http_stub import build_backup, build_tar, build_zip, odoo_error_page, odoo_like_members
 
 COMPRESSED_FORMATS = ("tar.gz", "tar.bz2", "tar.xz", "tar.zst")
-TAR_FORMATS = ("tar",) + COMPRESSED_FORMATS
+TAR_FORMATS = ("tar", *COMPRESSED_FORMATS)
 MODES = {"tar": "w", "tar.gz": "w:gz", "tar.bz2": "w:bz2", "tar.xz": "w:xz", "tar.zst": "w:zst"}
 RECORD = 10240
 
@@ -32,13 +33,14 @@ RECORD = 10240
 # helpers
 # --------------------------------------------------------------------------
 
+
 def verify_bytes(fmt: str, data: bytes, chunk_size: int | None = None):
     verifier = StreamVerifier(fmt)
     if chunk_size is None:
         verifier.feed(data)
     else:
         for start in range(0, len(data), chunk_size):
-            verifier.feed(data[start:start + chunk_size])
+            verifier.feed(data[start : start + chunk_size])
     return verifier.finish()
 
 
@@ -54,12 +56,20 @@ def compress(fmt: str, data: bytes) -> bytes:
     return zstd.compress(data)
 
 
-def raw_header(name: str, size: int = 0, typeflag: bytes = b"0", *, size_field: bytes | None = None,
-               prefix: str = "", signed_checksum: bool = False, gnu: bool = False) -> bytes:
+def raw_header(
+    name: str,
+    size: int = 0,
+    typeflag: bytes = b"0",
+    *,
+    size_field: bytes | None = None,
+    prefix: str = "",
+    signed_checksum: bool = False,
+    gnu: bool = False,
+) -> bytes:
     """A hand-made tar header with a correct checksum (unless the caller breaks it)."""
     block = bytearray(512)
     encoded = name.encode()
-    block[0:len(encoded)] = encoded
+    block[0 : len(encoded)] = encoded
     block[100:108] = b"0000644\0"
     block[108:116] = b"0000000\0"
     block[116:124] = b"0000000\0"
@@ -69,11 +79,8 @@ def raw_header(name: str, size: int = 0, typeflag: bytes = b"0", *, size_field: 
     block[156:157] = typeflag
     block[257:265] = b"ustar  \0" if gnu else b"ustar\x0000"
     encoded_prefix = prefix.encode()
-    block[345:345 + len(encoded_prefix)] = encoded_prefix
-    if signed_checksum:
-        checksum = sum(byte - 256 if byte > 127 else byte for byte in block)
-    else:
-        checksum = sum(block)
+    block[345 : 345 + len(encoded_prefix)] = encoded_prefix
+    checksum = sum(byte - 256 if byte > 127 else byte for byte in block) if signed_checksum else sum(block)
     block[148:156] = b"%06o\0 " % checksum
     return bytes(block)
 
@@ -133,6 +140,7 @@ def tar_layout(data: bytes) -> tuple[list[int], int]:
 # magic and HTML
 # --------------------------------------------------------------------------
 
+
 class CheckMagicTests(unittest.TestCase):
     def test_accepts_every_format(self):
         for fmt in verify.SUPPORTED_FORMATS:
@@ -182,8 +190,13 @@ class CheckMagicTests(unittest.TestCase):
 
 class LooksLikeHtmlTests(unittest.TestCase):
     def test_html_variants(self):
-        for head in (b"<!DOCTYPE html><html>", b"\n  <html>\n<head>", b"\xef\xbb\xbf<!doctype html>",
-                     b"<html lang=en><title>502</title>", b"<!-- x -->\n<html>"):
+        for head in (
+            b"<!DOCTYPE html><html>",
+            b"\n  <html>\n<head>",
+            b"\xef\xbb\xbf<!doctype html>",
+            b"<html lang=en><title>502</title>",
+            b"<!-- x -->\n<html>",
+        ):
             with self.subTest(head=head):
                 self.assertTrue(looks_like_html(head))
 
@@ -216,12 +229,15 @@ class ExtractHtmlErrorTests(unittest.TestCase):
     def test_pg_dump_failure_multiline_error(self):
         error = "Database backup error: Command `pg_dump` failed\n   exit status 1\n  <stderr>"
         page = odoo_error_page(error).encode()
-        self.assertEqual(extract_html_error(page),
-                         "Database backup error: Command `pg_dump` failed exit status 1 <stderr>")
+        self.assertEqual(
+            extract_html_error(page), "Database backup error: Command `pg_dump` failed exit status 1 <stderr>"
+        )
 
     def test_proxy_error_page_falls_back_to_page_text(self):
-        page = (b"<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n"
-                b"<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>")
+        page = (
+            b"<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n"
+            b"<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>"
+        )
         self.assertEqual(extract_html_error(page), "502 Bad Gateway nginx")
 
     def test_error_marker_without_alert(self):
@@ -248,6 +264,7 @@ class ExtractHtmlErrorTests(unittest.TestCase):
 # valid archives
 # --------------------------------------------------------------------------
 
+
 class ValidArchiveTests(unittest.TestCase):
     def test_every_tar_format_and_tar_dialect(self):
         dialects = {"pax": tarfile.PAX_FORMAT, "gnu": tarfile.GNU_FORMAT}
@@ -269,7 +286,7 @@ class ValidArchiveTests(unittest.TestCase):
         members = [("sql.dump", SQL), ("manifest.json", MANIFEST), (long_dir + "/" + "f" * 60, b"x")]
         data = build_tar(members, "w", format=tarfile.USTAR_FORMAT)
         offsets, _end = tar_layout(data)
-        self.assertEqual(data[offsets[2] + 345:offsets[2] + 355], long_dir.encode()[:10], "ustar prefix expected")
+        self.assertEqual(data[offsets[2] + 345 : offsets[2] + 355], long_dir.encode()[:10], "ustar prefix expected")
         self.assertTrue(verify_bytes("tar", data).has_filestore)
 
     def test_database_only_archive(self):
@@ -313,8 +330,11 @@ class ValidArchiveTests(unittest.TestCase):
 
     def test_gnu_long_name(self):
         name = "filestore/" + "n" * 200
-        data = minimal_tar(raw_header("././@LongLink", len(name) + 1, b"L", gnu=True) + pad(name.encode() + b"\0")
-                           + member(name[:99], b"data", gnu=True))
+        data = minimal_tar(
+            raw_header("././@LongLink", len(name) + 1, b"L", gnu=True)
+            + pad(name.encode() + b"\0")
+            + member(name[:99], b"data", gnu=True)
+        )
         result = verify_bytes("tar", data)
         self.assertEqual(result.members, 3)
         self.assertTrue(result.has_filestore)
@@ -339,7 +359,7 @@ class ValidArchiveTests(unittest.TestCase):
     def test_plain_tar_cut_inside_the_final_record_padding_is_complete(self):
         data = build_backup("tar")
         _offsets, end = tar_layout(data)
-        result = verify_bytes("tar", data[:end + 1024 + 700])
+        result = verify_bytes("tar", data[: end + 1024 + 700])
         self.assertTrue(result.has_sql_dump)
         self.assertEqual(len(result.notes), 1)
         self.assertIn("10240-byte tar record", result.notes[0])
@@ -365,16 +385,13 @@ class ValidArchiveTests(unittest.TestCase):
         self.assertIsNone(result.members)
 
     def test_supported_formats_match_the_configuration(self):
-        try:
-            from odoo_backup.config import ALLOWED_FORMATS
-        except ImportError:
-            self.skipTest("odoo_backup.config is not available yet")
         self.assertEqual(tuple(ALLOWED_FORMATS), verify.SUPPORTED_FORMATS)
 
 
 # --------------------------------------------------------------------------
 # truncated and corrupt archives
 # --------------------------------------------------------------------------
+
 
 class TruncationTests(unittest.TestCase):
     def assert_rejected(self, fmt: str, data: bytes, chunk_size: int | None = None):
@@ -394,9 +411,9 @@ class TruncationTests(unittest.TestCase):
         data = build_backup("tar")
         offsets, _end = tar_layout(data)
         with self.assertRaisesRegex(ArchiveVerificationError, r"inside member 'sql\.dump'"):
-            verify_bytes("tar", data[:offsets[0] + 512 + 100])
+            verify_bytes("tar", data[: offsets[0] + 512 + 100])
         with self.assertRaisesRegex(ArchiveVerificationError, "end-of-archive marker missing"):
-            verify_bytes("tar", data[:offsets[2]])  # exactly at a member boundary
+            verify_bytes("tar", data[: offsets[2]])  # exactly at a member boundary
 
     def test_compressed_formats_truncated_anywhere(self):
         for fmt in COMPRESSED_FORMATS:
@@ -417,7 +434,7 @@ class TruncationTests(unittest.TestCase):
         tar = build_backup("tar")
         offsets, _end = tar_layout(tar)
         compressor = zlib.compressobj(9, zlib.DEFLATED, -15)
-        body = compressor.compress(tar[:offsets[3]]) + compressor.flush(zlib.Z_SYNC_FLUSH)
+        body = compressor.compress(tar[: offsets[3]]) + compressor.flush(zlib.Z_SYNC_FLUSH)
         with self.assertRaisesRegex(ArchiveVerificationError, "truncated"):
             verify_bytes("tar.gz", b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff" + body)
 
@@ -552,9 +569,9 @@ class VerifierBehaviourTests(unittest.TestCase):
         offsets, _end = tar_layout(bytes(data))
         data[offsets[1] + 10] ^= 0x01  # manifest header
         verifier = StreamVerifier("tar")
-        verifier.feed(bytes(data[:offsets[1]]))
+        verifier.feed(bytes(data[: offsets[1]]))
         with self.assertRaisesRegex(ArchiveVerificationError, "checksum"):
-            verifier.feed(bytes(data[offsets[1]:offsets[1] + 512]))
+            verifier.feed(bytes(data[offsets[1] : offsets[1] + 512]))
 
     def test_errors_are_sticky_and_feed_after_finish_fails(self):
         verifier = StreamVerifier("tar")

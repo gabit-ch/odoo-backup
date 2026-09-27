@@ -18,6 +18,7 @@ import base64
 import binascii
 import dataclasses
 import hashlib
+import itertools
 import logging
 import os
 import posixpath
@@ -146,7 +147,7 @@ def host_key_matches(key: paramiko.PKey, entries: Sequence[str]) -> bool:
     known_hosts marker lines (``@revoked``, ``@cert-authority``) and comments never match.
     """
     blob = key.asbytes()
-    observed = fingerprint(key)[len("SHA256:"):]
+    observed = fingerprint(key)[len("SHA256:") :]
     return any(_entry_matches(entry, blob, observed) for entry in entries)
 
 
@@ -169,7 +170,7 @@ def _entry_public_key(text: str) -> tuple[str, bytes] | None:
     if not text or text.startswith(("#", "@")) or text[:7].upper() == "SHA256:":
         return None
     tokens = text.split()
-    for key_type, data in zip(tokens, tokens[1:]):
+    for key_type, data in itertools.pairwise(tokens):
         candidate = _decode_key_blob(key_type, data)
         if candidate is not None:
             return key_type, candidate
@@ -186,7 +187,7 @@ def _decode_key_blob(key_type: str, data: str) -> bytes | None:
     """Decode an OpenSSH public key blob; None unless it is valid base64 of ``key_type``."""
     try:
         decoded = base64.b64decode(data, validate=True)
-    except (binascii.Error, ValueError):
+    except binascii.Error, ValueError:
         return None
     name = key_type.encode("ascii", "replace")
     header = struct.pack(">I", len(name)) + name
@@ -260,7 +261,7 @@ class SFTPConnection:
     def __repr__(self) -> str:
         return f"SFTPConnection({self.user}@{self.host}:{self.port})"
 
-    def __enter__(self) -> "SFTPConnection":
+    def __enter__(self) -> SFTPConnection:
         self.connect()
         return self
 
@@ -300,9 +301,7 @@ class SFTPConnection:
                 # Raises SSHException if the key exchange did not finish within the timeout.
                 server_key = transport.get_remote_server_key()
             except _REMOTE_ERRORS as exc:
-                raise SFTPError(
-                    f"SSH handshake with {self.address} failed or timed out: {_describe(exc)}"
-                ) from exc
+                raise SFTPError(f"SSH handshake with {self.address} failed or timed out: {_describe(exc)}") from exc
             self._verify_host_key(server_key)
             self._authenticate(transport, pkey)
             sftp = self._open_sftp_session(transport)
@@ -314,7 +313,11 @@ class SFTPConnection:
             raise
         logger.info(
             "Connected to SFTP server %s as %s (host key %s %s, cipher %s)",
-            self.address, self.user, self.server_key_type, self.server_fingerprint, self.cipher,
+            self.address,
+            self.user,
+            self.server_key_type,
+            self.server_fingerprint,
+            self.cipher,
         )
 
     def close(self) -> None:
@@ -460,7 +463,10 @@ class SFTPConnection:
             logger.warning(
                 "SFTP host key of %s is NOT verified because SFTP_HOST_KEY is not set; the server "
                 "presented %s %s (pin it with SFTP_HOST_KEY=%s)",
-                self.address, self.server_key_type, self.server_fingerprint, self.server_fingerprint,
+                self.address,
+                self.server_key_type,
+                self.server_fingerprint,
+                self.server_fingerprint,
             )
 
     def _authenticate(self, transport: paramiko.Transport, pkey: paramiko.PKey | None) -> None:
@@ -488,8 +494,7 @@ class SFTPConnection:
             if transport.is_authenticated():
                 return
         raise SFTPAuthenticationError(
-            f"SFTP authentication failed for user {self.user!r} on {self.address} "
-            f"(tried: {', '.join(tried)})"
+            f"SFTP authentication failed for user {self.user!r} on {self.address} (tried: {', '.join(tried)})"
         )
 
     def _client(self) -> paramiko.SFTPClient:
@@ -498,8 +503,10 @@ class SFTPConnection:
             if self._sftp is not None:
                 logger.warning("SFTP connection to %s was lost; reconnecting", self.address)
             self.connect()
-        assert self._sftp is not None
-        return self._sftp
+        client = self._sftp
+        if client is None:  # connect() either opens the SFTP session or raises
+            raise SFTPError(f"SFTP connection to {self.address} is not open")
+        return client
 
     # -- remote file operations ------------------------------------------------------------
 
@@ -614,9 +621,7 @@ class SFTPConnection:
                 probe.write(_PROBE_PAYLOAD)
             size = sftp.stat(path).st_size
             if size != len(_PROBE_PAYLOAD):
-                raise SFTPError(
-                    f"SFTP write probe {path!r} has {size} bytes instead of {len(_PROBE_PAYLOAD)}"
-                )
+                raise SFTPError(f"SFTP write probe {path!r} has {size} bytes instead of {len(_PROBE_PAYLOAD)}")
             sftp.remove(path)
             created = False
         except _REMOTE_ERRORS as exc:
@@ -673,7 +678,7 @@ class SFTPConnection:
                 result = self._upload_attempt(
                     local_path, local_size, tmp_path, final_path, attempt, attempts, progress, state
                 )
-            except (HostKeyMismatchError, SFTPAuthenticationError):
+            except HostKeyMismatchError, SFTPAuthenticationError:
                 raise
             except UploadError as exc:
                 if not exc.retryable:
@@ -685,10 +690,15 @@ class SFTPConnection:
             else:
                 result = dataclasses.replace(result, seconds=time.monotonic() - started)
                 logger.info(
-                    "Uploaded %s (%d bytes) to %s in %.1f s (%.1f MB/s, write requests of %d bytes, "
-                    "attempt %d/%d)",
-                    name, local_size, self.address, result.seconds, _mb_per_second(local_size, result.seconds),
-                    result.request_size, attempt, attempts,
+                    "Uploaded %s (%d bytes) to %s in %.1f s (%.1f MB/s, write requests of %d bytes, attempt %d/%d)",
+                    name,
+                    local_size,
+                    self.address,
+                    result.seconds,
+                    _mb_per_second(local_size, result.seconds),
+                    result.request_size,
+                    attempt,
+                    attempts,
                 )
                 return result
             logger.warning(
@@ -715,7 +725,7 @@ class SFTPConnection:
         attempt: int,
         attempts: int,
         progress: Callable[[int], object] | None,
-        state: "_UploadState",
+        state: _UploadState,
     ) -> UploadResult:
         """One upload attempt; ``UploadResult.seconds`` is the duration of this attempt."""
         sftp = self._client()
@@ -732,7 +742,13 @@ class SFTPConnection:
         label = posixpath.basename(final_path)
         logger.info(
             "Uploading %s (%.2f GiB) to %s:%s (attempt %d/%d, write requests of %d bytes)",
-            label, local_size / _GIB, self.address, tmp_path, attempt, attempts, request_size,
+            label,
+            local_size / _GIB,
+            self.address,
+            tmp_path,
+            attempt,
+            attempts,
+            request_size,
         )
         reporter = _ProgressReporter(label, local_size, attempt, attempts)
         sent = 0
@@ -771,8 +787,7 @@ class SFTPConnection:
         if final.st_size != local_size:
             self._remove_quietly(final_path)  # never leave an incomplete file under the final name
             raise UploadError(
-                f"size mismatch after renaming to {final_path}: "
-                f"remote {final.st_size} bytes, local {local_size} bytes"
+                f"size mismatch after renaming to {final_path}: remote {final.st_size} bytes, local {local_size} bytes"
             )
         return UploadResult(final_path, local_size, reporter.elapsed(), final.st_mtime, request_size)
 
@@ -844,8 +859,13 @@ class _ProgressReporter:
         percent = 100.0 * done / self._total if self._total else 100.0
         logger.info(
             "Uploading %s: %.1f%% (%.2f of %.2f GiB) at %.1f MB/s (attempt %d/%d)",
-            self._label, percent, done / _GIB, self._total / _GIB,
-            _mb_per_second(done, now - self._start), self._attempt, self._attempts,
+            self._label,
+            percent,
+            done / _GIB,
+            self._total / _GIB,
+            _mb_per_second(done, now - self._start),
+            self._attempt,
+            self._attempts,
         )
         self._last_log = now
         while self._next_bytes <= done:
@@ -899,7 +919,8 @@ def _query_write_limit(sftp: paramiko.SFTPClient) -> int:
     except Exception as exc:  # any failure only means "no usable limits"
         logger.debug(
             "limits@openssh.com unavailable (%s); using %d byte write requests",
-            _describe(exc), DEFAULT_REQUEST_SIZE,
+            _describe(exc),
+            DEFAULT_REQUEST_SIZE,
         )
         return DEFAULT_REQUEST_SIZE
     if max_write <= 0:

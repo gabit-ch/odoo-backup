@@ -1,7 +1,7 @@
 import random
 import unittest
 from collections import Counter
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from odoo_backup.retention import (
@@ -91,8 +91,7 @@ class ParseAndBuildTest(unittest.TestCase):
                     BackupFile(ts=self.TS, name=name, serie="19.0", db="master", fmt=fmt, partial=False),
                 )
                 partial = parse_backup_name(name + PARTIAL_SUFFIX)
-                self.assertEqual((partial.ts, partial.db, partial.fmt, partial.partial),
-                                 (self.TS, "master", fmt, True))
+                self.assertEqual((partial.ts, partial.db, partial.fmt, partial.partial), (self.TS, "master", fmt, True))
 
     def test_db_names_with_separators_and_prefix_collisions(self):
         dbs = ("master", "master-old", "master_copy", "master-test", "tz-prod.v2_1", "a-20260101-010000")
@@ -137,7 +136,7 @@ class ParseAndBuildTest(unittest.TestCase):
             "odoo19.0-master-20260927-250000.zip",
             "odoo19.0-master-20260927-016000.zip",
             "odoo19.0-master-2026927-010003.zip",
-            "odoo19.0-master-٢٠٢٦0927-010003.zip",  # non-ASCII digits
+            "odoo19.0-master-\u0662\u0660\u0662\u06660927-010003.zip",  # non-ASCII (Arabic-Indic) digits
             # unknown extensions
             "odoo19.0-master-20260927-010003.rar",
             "odoo19.0-master-20260927-010003.TAR.GZ",
@@ -154,28 +153,42 @@ class ParseAndBuildTest(unittest.TestCase):
                 self.assertIsNone(parse_backup_name(name))
 
     def test_build_refuses_names_retention_could_not_manage(self):
-        for serie, db, fmt in (("saas-19.1", "master", "zip"), ("19.0", "a/b", "zip"),
-                               ("19.0", "master", "rar"), ("19.0", "", "zip")):
+        for serie, db, fmt in (
+            ("saas-19.1", "master", "zip"),
+            ("19.0", "a/b", "zip"),
+            ("19.0", "master", "rar"),
+            ("19.0", "", "zip"),
+        ):
             with self.subTest(serie=serie, db=db, fmt=fmt), self.assertRaises(ValueError):
                 build_file_name(serie, db, self.TS, fmt)
 
     def test_backup_files_order_by_time_then_name(self):
-        a, b, c = (parse_backup_name(x) for x in (
-            n(self.TS, fmt="zip"), n(self.TS, fmt="tar.gz"), n(self.TS - timedelta(seconds=1), fmt="zip")))
+        a, b, c = (
+            parse_backup_name(x)
+            for x in (n(self.TS, fmt="zip"), n(self.TS, fmt="tar.gz"), n(self.TS - timedelta(seconds=1), fmt="zip"))
+        )
         self.assertEqual(sorted([a, b, c]), [c, b, a])
 
 
 class PolicyValidationTest(unittest.TestCase):
     def policy(self, **overrides):
-        values = dict(keep_last=0, keep_daily=30, keep_monthly=12, keep_yearly=-1, anchor=time(1, 0))
+        values = {"keep_last": 0, "keep_daily": 30, "keep_monthly": 12, "keep_yearly": -1, "anchor": time(1, 0)}
         values.update(overrides)
         return RetentionPolicy(**values)
 
     def test_invalid_values(self):
-        for overrides in ({"keep_last": -1}, {"keep_daily": -1}, {"keep_monthly": -5}, {"keep_yearly": -2},
-                          {"keep_daily": True}, {"keep_last": 1.0}, {"keep_yearly": "1"},
-                          {"anchor": "01:00"}, {"anchor": time(1, tzinfo=timezone.utc)},
-                          {"keep_last": 0, "keep_daily": 0, "keep_monthly": 0, "keep_yearly": 0}):
+        for overrides in (
+            {"keep_last": -1},
+            {"keep_daily": -1},
+            {"keep_monthly": -5},
+            {"keep_yearly": -2},
+            {"keep_daily": True},
+            {"keep_last": 1.0},
+            {"keep_yearly": "1"},
+            {"anchor": "01:00"},
+            {"anchor": time(1, tzinfo=UTC)},
+            {"keep_last": 0, "keep_daily": 0, "keep_monthly": 0, "keep_yearly": 0},
+        ):
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 self.policy(**overrides)
 
@@ -193,13 +206,16 @@ class PlanBasicsTest(unittest.TestCase):
 
     def test_empty_listing(self):
         plan = plan_retention([], "master", PROD, self.NOW)
-        self.assertEqual((dict(plan.keep), plan.delete, plan.stale_partials, plan.ignored, plan.future),
-                         ({}, (), (), 0, ()))
-        self.assertEqual(plan.summary(), "keep 0 [hourly 0, daily 0, monthly 0, yearly 0], delete 0, ignored 0, future 0")
+        self.assertEqual(
+            (dict(plan.keep), plan.delete, plan.stale_partials, plan.ignored, plan.future), ({}, (), (), 0, ())
+        )
+        self.assertEqual(
+            plan.summary(), "keep 0 [hourly 0, daily 0, monthly 0, yearly 0], delete 0, ignored 0, future 0"
+        )
 
     def test_summary_counts_reasons_per_rule(self):
         names = [n(ts) for ts in schedule(datetime(2024, 1, 1), self.NOW)]
-        plan = plan_retention(names + ["notes.txt", "odoo19.0-other-20260101-010000.zip"], "master", PROD, self.NOW)
+        plan = plan_retention([*names, "notes.txt", "odoo19.0-other-20260101-010000.zip"], "master", PROD, self.NOW)
         self.assertEqual(
             plan.summary(),
             f"keep {len(plan.keep)} [hourly 12, daily 30, monthly 12, yearly 3], "
@@ -244,8 +260,10 @@ class ProductionSimulationTest(unittest.TestCase):
     def test_steady_state_counts(self):
         self.assertEqual(len(self.files), 53)
         counts = Counter(reason for reasons in self.plan.keep.values() for reason in reasons)
-        self.assertEqual((counts[REASON_HOURLY], counts[REASON_DAILY], counts[REASON_MONTHLY], counts[REASON_YEARLY]),
-                         (12, 30, 12, 2))
+        self.assertEqual(
+            (counts[REASON_HOURLY], counts[REASON_DAILY], counts[REASON_MONTHLY], counts[REASON_YEARLY]),
+            (12, 30, 12, 2),
+        )
         # A steady-state run deletes at most one or two files, never a burst.
         self.assertLessEqual(self.largest, 2)
 
@@ -285,8 +303,11 @@ class PlanRulesTest(unittest.TestCase):
         self.assertEqual(len(plan.keep), 4)
 
     def test_outage_keeps_daily_backups_from_before_the_outage(self):
-        runs = [n(ts) for ts in schedule(datetime(2026, 5, 1), self.NOW)
-                if not date(2026, 7, 10) <= ts.date() <= date(2026, 9, 20)]
+        runs = [
+            n(ts)
+            for ts in schedule(datetime(2026, 5, 1), self.NOW)
+            if not date(2026, 7, 10) <= ts.date() <= date(2026, 9, 20)
+        ]
         files, _deleted, largest = simulate(PROD, runs)
         plan = plan_retention(files, "master", PROD, self.NOW)
         daily = [ts_of(x).date() for x in kept_with(plan, REASON_DAILY)]
@@ -358,9 +379,16 @@ class PlanRulesTest(unittest.TestCase):
 
     def test_other_databases_and_foreign_files_are_never_deleted(self):
         ours = [n(ts) for ts in schedule(datetime(2025, 1, 1), self.NOW, every=12)]
-        foreign = [n(ts, db=db) for ts in schedule(datetime(2020, 1, 1), datetime(2020, 3, 1), every=12)
-                   for db in ("staging", "master-old", "Master")]
-        foreign += ["notes.txt", "odoo19.0-master-20200101-010000.zip.bak", "odoo19.0-staging-20200101-010000.zip.upload"]
+        foreign = [
+            n(ts, db=db)
+            for ts in schedule(datetime(2020, 1, 1), datetime(2020, 3, 1), every=12)
+            for db in ("staging", "master-old", "Master")
+        ]
+        foreign += [
+            "notes.txt",
+            "odoo19.0-master-20200101-010000.zip.bak",
+            "odoo19.0-staging-20200101-010000.zip.upload",
+        ]
         plan = plan_retention(ours + foreign, "master", PROD, self.NOW, partial_cutoff=self.NOW)
         self.assertEqual(plan.ignored, len(foreign))
         touched = {b.name for b in plan.delete + plan.stale_partials} | set(plan.keep)
@@ -370,8 +398,10 @@ class PlanRulesTest(unittest.TestCase):
     def test_mixed_series_and_formats_form_one_timeline(self):
         """17.0 zip backups until the cutover, 19.0 tar.gz afterwards: one database, one timeline."""
         cutover = datetime(2026, 9, 26, 12, 0)
-        runs = [n(ts, serie="17.0", fmt="zip") if ts < cutover else n(ts)
-                for ts in schedule(datetime(2025, 9, 15), self.NOW)]
+        runs = [
+            n(ts, serie="17.0", fmt="zip") if ts < cutover else n(ts)
+            for ts in schedule(datetime(2025, 9, 15), self.NOW)
+        ]
         files, _, largest = simulate(PROD, runs)
         plan = plan_retention(files, "master", PROD, self.NOW)
         self.assertEqual(plan.delete, ())
@@ -400,7 +430,7 @@ class PlanRulesTest(unittest.TestCase):
         # Partials never occupy hourly slots or become the newest backup.
         partials = [n(self.NOW - timedelta(hours=2 * i)) + PARTIAL_SUFFIX for i in range(20)]
         old = n(datetime(2020, 1, 1, 1))
-        plan = plan_retention(partials + [old], "master", PROD, self.NOW)
+        plan = plan_retention([*partials, old], "master", PROD, self.NOW)
         self.assertEqual((plan.delete, set(plan.keep)), ((), {old}))
 
     def test_future_dated_backups_are_kept_and_excluded_from_the_rules(self):
@@ -416,9 +446,13 @@ class PlanRulesTest(unittest.TestCase):
         edge = n(self.NOW.replace(microsecond=0) + timedelta(days=1))
         beyond = n(self.NOW.replace(microsecond=0) + timedelta(days=1, seconds=1))
         plan = plan_retention([edge, beyond], "master", PROD, self.NOW.replace(microsecond=0))
-        self.assertEqual((plan.keep[edge], plan.keep[beyond]), (frozenset({REASON_NEWEST, REASON_HOURLY, REASON_DAILY,
-                                                                           REASON_MONTHLY, REASON_YEARLY}),
-                                                                frozenset({REASON_FUTURE})))
+        self.assertEqual(
+            (plan.keep[edge], plan.keep[beyond]),
+            (
+                frozenset({REASON_NEWEST, REASON_HOURLY, REASON_DAILY, REASON_MONTHLY, REASON_YEARLY}),
+                frozenset({REASON_FUTURE}),
+            ),
+        )
 
     def test_same_timestamp_in_two_formats(self):
         ts = datetime(2026, 9, 27, 1, 0, 3)
@@ -452,23 +486,32 @@ class TimeZoneListingTest(unittest.TestCase):
     DAILY_ONLY = RetentionPolicy(keep_last=0, keep_daily=400, keep_monthly=0, keep_yearly=0, anchor=time(2))
 
     def test_dst_gap_in_europe_zurich(self):
-        runs = scheduler_names(datetime(2026, 3, 27, tzinfo=ZURICH), datetime(2026, 3, 30, 23, 30, tzinfo=ZURICH),
-                               ZURICH, self.SLOTS_HOURLY_FROM_2)
+        runs = scheduler_names(
+            datetime(2026, 3, 27, tzinfo=ZURICH),
+            datetime(2026, 3, 30, 23, 30, tzinfo=ZURICH),
+            ZURICH,
+            self.SLOTS_HOURLY_FROM_2,
+        )
         spring = [x for x in runs if ts_of(x).date() == date(2026, 3, 29)]
         # 02:00 does not exist on 2026-03-29: the run happened at 03:00 (once) and represents the day.
         self.assertEqual(len(spring), 23)
         self.assertNotIn(n(datetime(2026, 3, 29, 2)), spring)
         plan = plan_retention(runs, "master", self.DAILY_ONLY, datetime(2026, 3, 31))
-        self.assertEqual([ts_of(x) for x in kept_with(plan, REASON_DAILY)],
-                         [datetime(2026, 3, 27, 2), datetime(2026, 3, 28, 2), datetime(2026, 3, 29, 3),
-                          datetime(2026, 3, 30, 2)])
+        self.assertEqual(
+            [ts_of(x) for x in kept_with(plan, REASON_DAILY)],
+            [datetime(2026, 3, 27, 2), datetime(2026, 3, 28, 2), datetime(2026, 3, 29, 3), datetime(2026, 3, 30, 2)],
+        )
         files, _, largest = simulate(self.POLICY, runs)
         self.assertEqual(plan_retention(files, "master", self.POLICY, ts_of(runs[-1])).delete, ())
         self.assertLessEqual(largest, 2)
 
     def test_dst_fold_in_europe_zurich(self):
-        runs = scheduler_names(datetime(2026, 10, 1, tzinfo=ZURICH), datetime(2026, 11, 5, 12, tzinfo=ZURICH),
-                               ZURICH, self.SLOTS_HOURLY_FROM_2)
+        runs = scheduler_names(
+            datetime(2026, 10, 1, tzinfo=ZURICH),
+            datetime(2026, 11, 5, 12, tzinfo=ZURICH),
+            ZURICH,
+            self.SLOTS_HOURLY_FROM_2,
+        )
         # The repeated hour runs once, so the fold never produces the same name twice.
         self.assertEqual(len(runs), len(set(runs)))
         self.assertEqual(Counter(ts_of(x).date() for x in runs)[date(2026, 10, 25)], 24)
@@ -486,9 +529,9 @@ class TimeZoneListingTest(unittest.TestCase):
     def test_time_zone_change_mid_series(self):
         """TZ switched from Europe/Zurich to UTC on 2026-09-20 22:00 UTC with BACKUP_TIME unchanged."""
         slots = build_slots(time(1, 0), 2, True)
-        switch = datetime(2026, 9, 20, 22, tzinfo=timezone.utc)
+        switch = datetime(2026, 9, 20, 22, tzinfo=UTC)
         before = scheduler_names(datetime(2026, 5, 1, tzinfo=ZURICH), switch, ZURICH, slots)
-        after = scheduler_names(switch, datetime(2026, 10, 15, tzinfo=timezone.utc), ZoneInfo("UTC"), slots)
+        after = scheduler_names(switch, datetime(2026, 10, 15, tzinfo=UTC), ZoneInfo("UTC"), slots)
         # The first UTC slot repeats a wall-clock name; the service never overwrites, so that run fails.
         collisions = set(before) & set(after)
         self.assertEqual(collisions, {n(datetime(2026, 9, 20, 23))})
@@ -505,7 +548,9 @@ class DeterminismTest(unittest.TestCase):
 
     def setUp(self):
         self.names = [n(ts) for ts in schedule(datetime(2025, 1, 1), self.NOW)]
-        self.names += [n(ts, serie="17.0", fmt="zip") for ts in schedule(datetime(2024, 11, 1), datetime(2025, 3, 1), every=6)]
+        self.names += [
+            n(ts, serie="17.0", fmt="zip") for ts in schedule(datetime(2024, 11, 1), datetime(2025, 3, 1), every=6)
+        ]
         self.names += ["notes.txt", n(self.NOW - timedelta(days=2)) + PARTIAL_SUFFIX, n(datetime(2027, 1, 1))]
 
     def test_idempotent(self):

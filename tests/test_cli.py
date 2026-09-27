@@ -10,6 +10,7 @@ import os
 import pathlib
 import re
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -137,8 +138,16 @@ class CheckTests(CliTestCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(
             [line.split(":", 1)[0] for line in lines],
-            ["OK config", "OK retention", "OK odoo", "OK master-password", "OK database", "OK sftp",
-             "OK target-dir", "OK db-only-dir"],
+            [
+                "OK config",
+                "OK retention",
+                "OK odoo",
+                "OK master-password",
+                "OK database",
+                "OK sftp",
+                "OK target-dir",
+                "OK db-only-dir",
+            ],
         )
         self.assertIn(f"OK odoo: Odoo 19.0 at {self.odoo.url}", lines)
         sftp_line = next(line for line in lines if line.startswith("OK sftp:"))
@@ -178,8 +187,11 @@ class CheckTests(CliTestCase):
         other = generate_ed25519_key().fingerprint
         code, output = self.run_main("--check", SFTP_HOST_KEY=other)
         self.assertEqual(code, 1)
-        self.assertRegex(output, rf"FAIL sftp: SFTP host key mismatch .* presented ssh-ed25519 "
-                                 rf"{re.escape(self.sftp.fingerprint)}")
+        self.assertRegex(
+            output,
+            rf"FAIL sftp: SFTP host key mismatch .* presented ssh-ed25519 "
+            rf"{re.escape(self.sftp.fingerprint)}",
+        )
         self.assertIn("FAIL target-dir: not checked: no SFTP connection", output)
         self.assertIn("FAIL db-only-dir: not checked: no SFTP connection", output)
         self.assertEqual(self.sftp.auth_attempts, [])
@@ -204,11 +216,14 @@ class CheckTests(CliTestCase):
     def test_db_only_path_naming_the_target_directory_fails(self) -> None:
         for filestore in ("false", "true"):
             with self.subTest(HOURLY_BACKUP_FILESTORE=filestore):
-                code, output = self.run_main("--check", DB_ONLY_BACKUP_PATH="backups", HOURLY_BACKUP_FILESTORE=filestore)
+                code, output = self.run_main(
+                    "--check", DB_ONLY_BACKUP_PATH="backups", HOURLY_BACKUP_FILESTORE=filestore
+                )
                 self.assertEqual(code, 1, output)
                 self.assertIn(
                     "FAIL db-only-dir: SFTP_PATH '/backups' and DB_ONLY_BACKUP_PATH 'backups' are the same directory "
-                    "on the SFTP server (/backups)", output,
+                    "on the SFTP server (/backups)",
+                    output,
                 )
         code, output = self.run_main("--check", HOURLY_BACKUP_FILESTORE="true")
         self.assertEqual(code, 0, output)
@@ -251,8 +266,6 @@ class CheckTests(CliTestCase):
 @contextlib.contextmanager
 def socket_port():
     """A local TCP port that refuses connections."""
-    import socket
-
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -283,8 +296,13 @@ class HealthTests(CliTestCase):
         self.assertIn("odoo19.0-master-20260927-010000.tar.gz", output)
 
         five_hours_ago = now - datetime.timedelta(hours=5)
-        store.save(State(started_at=now - datetime.timedelta(days=3), last_success_at=five_hours_ago,
-                         last_full_success_at=five_hours_ago))
+        store.save(
+            State(
+                started_at=now - datetime.timedelta(days=3),
+                last_success_at=five_hours_ago,
+                last_full_success_at=five_hours_ago,
+            )
+        )
         code, output = self.run_main("--health")  # every 2 h => max age 4 h
         self.assertEqual(code, 1)
         self.assertTrue(output.startswith("unhealthy: last successful backup 5h 0m ago"))
@@ -294,15 +312,21 @@ class HealthTests(CliTestCase):
 
     def test_database_only_successes_do_not_hide_failing_full_backups(self) -> None:
         now = datetime.datetime.now(UTC)
-        StateStore(self.state_dir).save(State(
-            started_at=now - datetime.timedelta(days=10),
-            last_success_at=now - datetime.timedelta(hours=1),
-            last_full_success_at=now - datetime.timedelta(days=3),
-        ))
+        StateStore(self.state_dir).save(
+            State(
+                started_at=now - datetime.timedelta(days=10),
+                last_success_at=now - datetime.timedelta(hours=1),
+                last_full_success_at=now - datetime.timedelta(days=3),
+            )
+        )
         code, output = self.run_main("--health")  # HOURLY_BACKUP_FILESTORE=false: full backups max 36 h
         self.assertEqual(code, 1)
-        self.assertTrue(output.startswith("unhealthy: last full backup (database + filestore) 3d 0h 0m ago, more "
-                                          "than the allowed 1d 12h 0m"), output)
+        self.assertTrue(
+            output.startswith(
+                "unhealthy: last full backup (database + filestore) 3d 0h 0m ago, more than the allowed 1d 12h 0m"
+            ),
+            output,
+        )
         code, output = self.run_main("--health", HOURLY_BACKUP_FILESTORE="true")
         self.assertEqual(code, 0, output)
 
@@ -362,8 +386,12 @@ class RetentionPlanTests(CliTestCase):
         self.assertEqual(code, 0, output)
         lines = output.splitlines()
         # The newest four count from the real "now": all 24 names are older than a day.
-        self.assertTrue(lines[0].startswith("/backups (full backups; last 4, daily 30, monthly 12, yearly all "
-                                            "(anchor 01:00:00)): keep "), lines[0])
+        self.assertTrue(
+            lines[0].startswith(
+                "/backups (full backups; last 4, daily 30, monthly 12, yearly all (anchor 01:00:00)): keep "
+            ),
+            lines[0],
+        )
         self.assertIn("  would delete odoo19.0-master-20260925-030000.tar.gz", lines)
         self.assertNotIn("  would delete odoo19.0-master-20260925-010000.tar.gz", lines)
         self.assertTrue(any(line.startswith("/backups/db-only (database-only backups; last 4") for line in lines))
@@ -515,12 +543,14 @@ class SignalAndJobTests(unittest.TestCase):
             store = StateStore(tmp)
             exits: list[int] = []
             config = offline_config()
-            with self.assertLogs("odoo_backup.runner", logging.CRITICAL):
-                with Watchdog(0.05, on_timeout=watchdog_recorder(config, store, False), exit_func=exits.append) as dog:
-                    self.assertTrue(dog.fired.wait(5))
-                    deadline = time.monotonic() + 5
-                    while not exits and time.monotonic() < deadline:
-                        time.sleep(0.01)
+            with (
+                self.assertLogs("odoo_backup.runner", logging.CRITICAL),
+                Watchdog(0.05, on_timeout=watchdog_recorder(config, store, False), exit_func=exits.append) as dog,
+            ):
+                self.assertTrue(dog.fired.wait(5))
+                deadline = time.monotonic() + 5
+                while not exits and time.monotonic() < deadline:
+                    time.sleep(0.01)
             self.assertEqual(exits, [3])
             state = store.load()
             self.assertIsNotNone(state.last_failure_at)
@@ -579,8 +609,10 @@ class ServiceHelperTests(CliTestCase):
         self.assertIn(f"odoo-backup {__version__}", text)
         self.assertIn("Schedule: every 2 h from 01:00:00 (Europe/Zurich): 01:00, 03:00*, 05:00*", text)
         self.assertIn("host key pinned (1 SFTP_HOST_KEY entries), authentication: password", text)
-        self.assertIn("Retention: last 4, daily 30, monthly 12, yearly all (anchor 01:00:00); database-only "
-                      "backups: newest 4", text)
+        self.assertIn(
+            "Retention: last 4, daily 30, monthly 12, yearly all (anchor 01:00:00); database-only backups: newest 4",
+            text,
+        )
         self.assertNotIn(self.sftp.password, text)
 
     def test_setup_logging_keeps_library_loggers_quiet(self) -> None:
@@ -686,7 +718,12 @@ class ProcessTests(CliTestCase):
     def run_process(self, args: list[str], env: dict[str, str], timeout: float = 60) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, "-X", "dev", "-W", "error::DeprecationWarning", str(BACKUP_PY), *args],
-            cwd=REPO, env=env, capture_output=True, text=True, timeout=timeout,
+            cwd=REPO,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,  # the tests assert the exit code themselves
         )
 
     def test_help(self) -> None:
@@ -726,8 +763,12 @@ class ProcessTests(CliTestCase):
         )
         completed = subprocess.run(
             [sys.executable, "-X", "dev", "-W", "error::DeprecationWarning", "-c", code],
-            cwd=REPO, env={"TMPDIR": str(self.base), "PYTHONDONTWRITEBYTECODE": "1"},
-            capture_output=True, text=True, timeout=60,
+            cwd=REPO,
+            env={"TMPDIR": str(self.base), "PYTHONDONTWRITEBYTECODE": "1"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout), {"threads": 1, "handlers": 0})
@@ -751,8 +792,11 @@ class ProcessTests(CliTestCase):
         outside = self.base / "outside.txt"
         outside.write_text("keep")
         later = (datetime.datetime.now(UTC) + datetime.timedelta(hours=12)).strftime("%H:%M")
-        process = _Process(self, [], self.process_env(TZ="UTC", BACKUP_EVERY_HOUR=None,
-                                                       HOURLY_BACKUP_FILESTORE=None, BACKUP_TIME=later))
+        process = _Process(
+            self,
+            [],
+            self.process_env(TZ="UTC", BACKUP_EVERY_HOUR=None, HOURLY_BACKUP_FILESTORE=None, BACKUP_TIME=later),
+        )
         self.assertTrue(process.wait_for("Next backup at", 30), process.stderr)
         process.proc.send_signal(signal.SIGTERM)
         code = process.finish(15)
@@ -774,8 +818,17 @@ class ProcessTests(CliTestCase):
             with self.subTest(stall=stall):
                 self.sftp.stall_sftp = stall
                 later = (datetime.datetime.now(UTC) + datetime.timedelta(hours=12)).strftime("%H:%M")
-                process = _Process(self, [], self.process_env(TZ="UTC", BACKUP_EVERY_HOUR=None, SFTP_TIMEOUT="2",
-                                                               HOURLY_BACKUP_FILESTORE=None, BACKUP_TIME=later))
+                process = _Process(
+                    self,
+                    [],
+                    self.process_env(
+                        TZ="UTC",
+                        BACKUP_EVERY_HOUR=None,
+                        SFTP_TIMEOUT="2",
+                        HOURLY_BACKUP_FILESTORE=None,
+                        BACKUP_TIME=later,
+                    ),
+                )
                 self.assertTrue(process.wait_for("Next backup at", 30), process.stderr)
                 self.assertIn("Start-up check: FAIL sftp: cannot open an SFTP session on 127.0.0.1:", process.stderr)
                 self.assertIn("the SFTP server did not answer within 2 s", process.stderr)
@@ -785,8 +838,11 @@ class ProcessTests(CliTestCase):
     def test_sigterm_during_the_startup_checks_stops_the_service(self) -> None:
         self.sftp.stall_sftp = "request"  # the SFTP check waits CHECK_SFTP_TIMEOUT (20 s)
         later = (datetime.datetime.now(UTC) + datetime.timedelta(hours=12)).strftime("%H:%M")
-        process = _Process(self, [], self.process_env(TZ="UTC", BACKUP_EVERY_HOUR=None, HOURLY_BACKUP_FILESTORE=None,
-                                                       BACKUP_TIME=later))
+        process = _Process(
+            self,
+            [],
+            self.process_env(TZ="UTC", BACKUP_EVERY_HOUR=None, HOURLY_BACKUP_FILESTORE=None, BACKUP_TIME=later),
+        )
         self.assertTrue(process.wait_for("Start-up check: OK database", 30), process.stderr)
         time.sleep(0.5)
         started = time.monotonic()
@@ -799,8 +855,9 @@ class ProcessTests(CliTestCase):
     def test_service_sigterm_during_a_run_records_it_and_exits_0(self) -> None:
         self.odoo.backup_overrides = {"delay": 30}  # Odoo "works" on the dump for 30 s
         soon = (datetime.datetime.now(UTC) + datetime.timedelta(seconds=6)).strftime("%H:%M:%S")
-        process = _Process(self, [], self.process_env(TZ="UTC", BACKUP_EVERY_HOUR=None,
-                                                       HOURLY_BACKUP_FILESTORE=None, BACKUP_TIME=soon))
+        process = _Process(
+            self, [], self.process_env(TZ="UTC", BACKUP_EVERY_HOUR=None, HOURLY_BACKUP_FILESTORE=None, BACKUP_TIME=soon)
+        )
         self.assertTrue(process.wait_for("Requesting a full tar.gz backup", 40), process.stderr)
         time.sleep(0.3)
         process.proc.send_signal(signal.SIGTERM)

@@ -1,0 +1,56 @@
+# Tool configuration only. odoo-backup ships as a Docker image and is not installed as a Python
+# package, so there is no [project] table: the runtime dependencies are pinned in
+# requirements.txt, the development tools in requirements-dev.txt.
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # isort
+    "B",       # flake8-bugbear
+    "UP",      # pyupgrade
+    "SIM",     # flake8-simplify
+    "RUF",     # ruff-specific rules
+    "S",       # flake8-bandit
+    "C4",      # flake8-comprehensions
+    "PLC", "PLE", "PLR", "PLW",  # pylint (conventions, errors, refactoring, warnings)
+]
+ignore = [
+    # Size metrics, not defects: the functions above the limits are the injection points the tests
+    # use (keyword-only factories, clocks, stubs) or validate many related settings in one place.
+    "PLR0911",  # too-many-return-statements
+    "PLR0912",  # too-many-branches
+    "PLR0913",  # too-many-arguments
+    "PLR0915",  # too-many-statements
+    "PLR0917",  # too-many-positional-arguments
+    # Protocol values (HTTP statuses, tar/zip header offsets, port and byte limits) read better
+    # inline than behind a constant name.
+    "PLR2004",  # magic-value-comparison
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",  # assert in test helpers and stubs is the point
+    "S105", "S106", "S107",  # hard-coded passwords are fake test credentials
+    "S108",  # /tmp paths are test data for the path validation, nothing is written there
+    "S311",  # random generates test data, not secrets
+    "S603",  # subprocess runs sys.executable or docker with fixed argument lists
+]
+# The HTML is a verbatim copy of Odoo's database manager markup inside a triple-quoted string.
+"tests/http_stub.py" = ["E501"]
+# The end-to-end driver runs the docker and ssh-keygen CLIs from PATH and talks to the Odoo it
+# started itself on 127.0.0.1.
+"tests/e2e/**" = ["S607", "S310"]
+
+[tool.coverage.run]
+branch = true
+source = ["odoo_backup"]
+
+[tool.coverage.report]
+show_missing = true
+# Measured 94.26 % (branch coverage, 405 tests, 2026-09-27): rounded down, minus one point.
+fail_under = 93

@@ -75,8 +75,15 @@ class OdooStubTestCase(unittest.TestCase):
         self.addCleanup(root.removeHandler, self.capture)
         self.addCleanup(self.assert_no_secret_logged)  # runs after the test's own cleanups
 
-    def client(self, *, password: str = PASSWORD, db: str = "master", url: str | None = None,
-               timeout: float = 5.0, read_timeout: float = 5.0) -> OdooClient:
+    def client(
+        self,
+        *,
+        password: str = PASSWORD,
+        db: str = "master",
+        url: str | None = None,
+        timeout: float = 5.0,
+        read_timeout: float = 5.0,
+    ) -> OdooClient:
         client = OdooClient(url or self.stub.url, password, db, timeout, read_timeout)
         self.addCleanup(client.close)
         return client
@@ -100,7 +107,8 @@ class OdooStubTestCase(unittest.TestCase):
 
     def logged(self, level: int, fragment: str) -> list[str]:
         return [
-            record.getMessage() for record in self.capture.records
+            record.getMessage()
+            for record in self.capture.records
             if record.levelno == level and fragment in record.getMessage()
         ]
 
@@ -111,6 +119,7 @@ class OdooStubTestCase(unittest.TestCase):
 # --------------------------------------------------------------------------
 # server_serie
 # --------------------------------------------------------------------------
+
 
 class ServerSerieTests(OdooStubTestCase):
     def test_version_info(self):
@@ -159,6 +168,7 @@ class ServerSerieTests(OdooStubTestCase):
 # master password
 # --------------------------------------------------------------------------
 
+
 class MasterPasswordTests(OdooStubTestCase):
     def test_correct_password(self):
         self.client().check_master_password()
@@ -185,8 +195,15 @@ class MasterPasswordTests(OdooStubTestCase):
         self.stub.set_handler(JSONRPC_PATH, not_found)
         self.client().check_master_password()
         [probe] = self.stub.requests_to(BACKUP_PATH)
-        self.assertEqual(probe.form, {"master_pwd": PASSWORD, "name": "master-odoo-backup-auth-probe",
-                                      "backup_format": "dump", "filestore": "false"})
+        self.assertEqual(
+            probe.form,
+            {
+                "master_pwd": PASSWORD,
+                "name": "master-odoo-backup-auth-probe",
+                "backup_format": "dump",
+                "filestore": "false",
+            },
+        )
         self.assertTrue(self.logged(logging.INFO, "backup probe"))
 
     def test_backup_probe_when_the_db_method_is_gone(self):
@@ -250,6 +267,7 @@ class MasterPasswordTests(OdooStubTestCase):
 # database check
 # --------------------------------------------------------------------------
 
+
 class DatabaseTests(OdooStubTestCase):
     def test_database_is_listed(self):
         self.client().check_database()
@@ -275,6 +293,7 @@ class DatabaseTests(OdooStubTestCase):
 # --------------------------------------------------------------------------
 # backup download
 # --------------------------------------------------------------------------
+
 
 class DownloadSuccessTests(OdooStubTestCase):
     def download(self, fmt: str = "tar.gz", with_filestore: bool = True, **kwargs) -> DownloadResult:
@@ -356,8 +375,14 @@ class DownloadFailureTests(OdooStubTestCase):
         super().setUp()
         self.dest = self.tmp / "odoo19.0-master-20260927-010000.tar.gz.part"
 
-    def assert_download_fails(self, exc_type: type[BaseException], *, client: OdooClient | None = None,
-                              fmt: str = "tar.gz", with_filestore: bool = True) -> BaseException:
+    def assert_download_fails(
+        self,
+        exc_type: type[BaseException],
+        *,
+        client: OdooClient | None = None,
+        fmt: str = "tar.gz",
+        with_filestore: bool = True,
+    ) -> BaseException:
         client = client or self.client()
         with self.assertRaises(exc_type) as ctx:
             client.download_backup(fmt, self.dest, with_filestore)
@@ -469,6 +494,7 @@ class DownloadFailureTests(OdooStubTestCase):
 # --------------------------------------------------------------------------
 # client details
 # --------------------------------------------------------------------------
+
 
 class ClientTests(OdooStubTestCase):
     def test_url_credentials_and_password_are_not_shown(self):

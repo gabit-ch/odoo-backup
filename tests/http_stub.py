@@ -50,6 +50,7 @@ TAR_MODES = {"tar": "w", "tar.gz": "w:gz", "tar.bz2": "w:bz2", "tar.xz": "w:xz",
 # Requests and responses
 # --------------------------------------------------------------------------
 
+
 @dataclass
 class StubRequest:
     method: str
@@ -99,7 +100,7 @@ def html_response(body: bytes | str, status: int = 200) -> StubResponse:
 def not_found(req: StubRequest | None = None) -> StubResponse:
     """Werkzeug-style 404 page (what Odoo answers for an unknown route)."""
     page = (
-        '<!doctype html>\n<html lang=en>\n<title>404 Not Found</title>\n<h1>Not Found</h1>\n'
+        "<!doctype html>\n<html lang=en>\n<title>404 Not Found</title>\n<h1>Not Found</h1>\n"
         "<p>The requested URL was not found on the server. If you entered the URL manually please "
         "check your spelling and try again.</p>\n"
     )
@@ -146,11 +147,11 @@ def backup_response(body: bytes | Iterable[bytes], *, filename: str = "backup", 
 # Odoo database manager error page
 # --------------------------------------------------------------------------
 
+
 def _qweb_escape(text: str) -> str:
     """Escape like QWeb t-out / markupsafe (' becomes &#39;, " becomes &#34;)."""
     return (
-        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        .replace('"', "&#34;").replace("'", "&#39;")
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&#34;").replace("'", "&#39;")
     )
 
 
@@ -175,7 +176,8 @@ def odoo_error_page(error: str, *, list_db: bool = True, databases: Iterable[str
     )
     disabled = (
         '<div class="alert alert-danger text-center">The database manager has been disabled by the administrator</div>'
-        if not list_db else ""
+        if not list_db
+        else ""
     )
     return f"""<!DOCTYPE html>
 <html>
@@ -252,6 +254,7 @@ def odoo_error_page(error: str, *, list_db: bool = True, databases: Iterable[str
 # Synthetic Odoo-like backups
 # --------------------------------------------------------------------------
 
+
 def odoo_like_members(
     with_filestore: bool = True, *, seed: int = 0, sql_name: str = "sql.dump"
 ) -> list[tuple[str, bytes | None]]:
@@ -263,8 +266,17 @@ def odoo_like_members(
     """
     rnd = random.Random(seed)
     sql = b"PGDMP" + rnd.randbytes(20_000) if sql_name == "sql.dump" else b"--\n-- PostgreSQL database dump\n--\n" * 400
-    manifest = json.dumps({"odoo_dump": "1", "db_name": "master", "version": "19.0", "major_version": "19.0",
-                           "pg_version": "16.4", "modules": {"base": "19.0.1.3"}}, indent=4).encode()
+    manifest = json.dumps(
+        {
+            "odoo_dump": "1",
+            "db_name": "master",
+            "version": "19.0",
+            "major_version": "19.0",
+            "pg_version": "16.4",
+            "modules": {"base": "19.0.1.3"},
+        },
+        indent=4,
+    ).encode()
     members: list[tuple[str, bytes | None]] = [(sql_name, sql), ("manifest.json", manifest)]
     if with_filestore:
         members += [
@@ -324,6 +336,7 @@ def _str2bool(value: str) -> bool:
 # Server
 # --------------------------------------------------------------------------
 
+
 class _QuietServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -369,7 +382,7 @@ class OdooHTTPStub:
 
     # lifecycle -------------------------------------------------------------
 
-    def start(self) -> "OdooHTTPStub":
+    def start(self) -> OdooHTTPStub:
         handler_class = type("_BoundHandler", (_StubHandler,), {"stub": self})
         self._server = _QuietServer(("127.0.0.1", 0), handler_class)
         self._thread = threading.Thread(
@@ -388,7 +401,7 @@ class OdooHTTPStub:
             self._thread.join(timeout=5)
             self._server = None
 
-    def __enter__(self) -> "OdooHTTPStub":
+    def __enter__(self) -> OdooHTTPStub:
         return self.start()
 
     def __exit__(self, *exc_info: object) -> None:
@@ -430,12 +443,14 @@ class OdooHTTPStub:
         form = req.form
         # Odoo: check_super(master_pwd) first, then http.db_list() (AccessDenied without list_db)
         if form.get("master_pwd") != self.master_password or not self.list_db:
-            return html_response(odoo_error_page("Database backup error: Access Denied", list_db=self.list_db,
-                                                 databases=self.databases))
+            return html_response(
+                odoo_error_page("Database backup error: Access Denied", list_db=self.list_db, databases=self.databases)
+            )
         name = form.get("name", "")
         if name not in self.databases:
-            return html_response(odoo_error_page(f"Database backup error: Database {name!r} is not known",
-                                                 databases=self.databases))
+            return html_response(
+                odoo_error_page(f"Database backup error: Database {name!r} is not known", databases=self.databases)
+            )
         fmt = form.get("backup_format", "zip")
         with_filestore = _str2bool(form.get("filestore", "true")) if self.honour_filestore else True
         response = backup_response(self.backup_body(fmt, with_filestore), filename=f"{name}_2026-09-27_01-00-00.{fmt}")
@@ -502,8 +517,9 @@ class _StubHandler(BaseHTTPRequestHandler):
         try:
             response = handler(req)
         except Exception:  # a broken test handler must be visible, not hang the client
-            response = StubResponse(500, traceback.format_exc().encode(), [("Content-Type", "text/plain")],
-                                    content_length=True)
+            response = StubResponse(
+                500, traceback.format_exc().encode(), [("Content-Type", "text/plain")], content_length=True
+            )
         self._send(response)
 
     def _send(self, response: StubResponse) -> None:
@@ -522,11 +538,10 @@ class _StubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         sent = 0
         for chunk in chunks:
-            if response.truncate_after is not None:
-                chunk = chunk[:max(0, response.truncate_after - sent)]
-            if chunk:
-                self.wfile.write(chunk)
-                sent += len(chunk)
+            data = chunk if response.truncate_after is None else chunk[: max(0, response.truncate_after - sent)]
+            if data:
+                self.wfile.write(data)
+                sent += len(data)
             if response.truncate_after is not None and sent >= response.truncate_after:
                 break
         self.wfile.flush()
@@ -537,11 +552,11 @@ __all__ = [
     "BACKUP_PATH",
     "DATABASE_LIST_PATH",
     "JSONRPC_PATH",
+    "VERSION_INFO_PATH",
+    "XMLRPC_COMMON_PATH",
     "OdooHTTPStub",
     "StubRequest",
     "StubResponse",
-    "VERSION_INFO_PATH",
-    "XMLRPC_COMMON_PATH",
     "backup_response",
     "build_backup",
     "build_tar",

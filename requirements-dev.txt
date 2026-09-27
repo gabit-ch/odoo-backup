@@ -1,0 +1,31 @@
+# Development and CI tools of odoo-backup (Python 3.14): the runtime closure plus the exact and
+# complete closure of ruff, coverage and pip-audit.
+# Install with:  pip install --only-binary=:all: --no-deps -r requirements-dev.txt && pip check
+# Every package ships wheels for manylinux (CI) and macOS. Dependabot keeps the pins current
+# (see .github/dependabot.yml); pip itself (needed by pip-api) comes with the virtualenv.
+-r requirements.txt
+
+ruff==0.16.9
+coverage==7.16.1
+pip-audit==2.10.1
+cachecontrol==0.14.4           # via pip-audit
+filelock==4.0.4                # via cachecontrol[filecache]
+msgpack==1.2.2                 # via cachecontrol
+cyclonedx-python-lib==11.12.0  # via pip-audit
+boolean.py==5.0                # via license-expression
+defusedxml==0.7.1              # via py-serializable
+license-expression==30.4.4     # via cyclonedx-python-lib
+packageurl-python==0.17.6      # via cyclonedx-python-lib
+py-serializable==2.1.0         # via cyclonedx-python-lib
+sortedcontainers==2.4.0        # via cyclonedx-python-lib
+packaging==26.3                # via pip-audit, pip-requirements-parser
+pip-api==0.0.35                # via pip-audit
+pip-requirements-parser==32.0.1  # via pip-audit
+pyparsing==3.3.3               # via pip-requirements-parser
+platformdirs==4.12.0           # via pip-audit
+rich==15.0.0                   # via pip-audit
+markdown-it-py==4.2.0          # via rich
+mdurl==0.1.2                   # via markdown-it-py
+pygments==2.21.0               # via rich
+tomli==2.4.1                   # via pip-audit
+tomli-w==1.2.0                 # via pip-audit

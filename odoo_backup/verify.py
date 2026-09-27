@@ -41,9 +41,9 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
 __all__ = [
+    "SUPPORTED_FORMATS",
     "ArchiveVerificationError",
     "StreamVerifier",
-    "SUPPORTED_FORMATS",
     "VerificationResult",
     "check_magic",
     "extract_html_error",
@@ -138,6 +138,7 @@ class VerificationResult:
 # Magic and HTML helpers
 # --------------------------------------------------------------------------
 
+
 def looks_like_html(head: bytes) -> bool:
     """Return True if the leading bytes of a response are an HTML page.
 
@@ -170,9 +171,7 @@ def check_magic(fmt: str, head: bytes) -> None:
     elif head.startswith(_MAGIC[fmt]):
         return
     if looks_like_html(head):
-        raise ArchiveVerificationError(
-            f"expected a {fmt} backup but received an HTML page: {extract_html_error(page)}"
-        )
+        raise ArchiveVerificationError(f"expected a {fmt} backup but received an HTML page: {extract_html_error(page)}")
     raise ArchiveVerificationError(_describe_bad_magic(fmt, head))
 
 
@@ -202,10 +201,7 @@ def _guess_format(head: bytes) -> str | None:
 def _describe_bad_magic(fmt: str, head: bytes) -> str:
     if fmt == "tar" and len(head) < BLOCK_SIZE and not _guess_format(head):
         return f"not a tar backup: only {len(head)} bytes received, a tar header needs {BLOCK_SIZE}"
-    message = (
-        f"not a {fmt} backup: expected {_FORMAT_DESCRIPTIONS[fmt]}, "
-        f"but the data starts with {head[:16].hex(' ')}"
-    )
+    message = f"not a {fmt} backup: expected {_FORMAT_DESCRIPTIONS[fmt]}, but the data starts with {head[:16].hex(' ')}"
     actual = _guess_format(head)
     if actual == "dump" and fmt != "dump":
         message += (
@@ -313,6 +309,7 @@ def extract_html_error(body: bytes) -> str:
 # tar header parsing
 # --------------------------------------------------------------------------
 
+
 def _parse_number(field_bytes: bytes) -> int:
     """Decode a tar numeric field (octal text or GNU base-256), like tarfile.nti()."""
     if field_bytes[0] in (0x80, 0xFF):
@@ -363,7 +360,7 @@ def _parse_pax_records(data: bytes, offset: int) -> dict[str, str]:
         end = match.start(1) + length - 1  # index of the record's trailing newline
         if length < 5 or pos + length > len(data) or data[end] != 0x0A:
             raise ArchiveVerificationError(f"invalid PAX record framing at tar offset {offset}")
-        keyword, equals, value = data[match.end(1) + 1:end].partition(b"=")
+        keyword, equals, value = data[match.end(1) + 1 : end].partition(b"=")
         if not keyword or equals != b"=":
             raise ArchiveVerificationError(f"invalid PAX record at tar offset {offset}")
         records[keyword.decode("utf-8", "surrogateescape")] = value.decode("utf-8", "surrogateescape")
@@ -420,7 +417,7 @@ class _TarWalker:
             if self._collect_left:
                 step = min(self._collect_left, end - pos)
                 if self._collect_type != _GNU_LONGLINK_TYPE:  # link names are not needed
-                    self._collected += view[pos:pos + step]
+                    self._collected += view[pos : pos + step]
                 self._collect_left -= step
                 pos += step
                 if not self._collect_left:
@@ -432,11 +429,11 @@ class _TarWalker:
                 pos = end
                 continue
             if not self._header and end - pos >= BLOCK_SIZE:
-                block = view[pos:pos + BLOCK_SIZE].tobytes()
+                block = view[pos : pos + BLOCK_SIZE].tobytes()
                 pos += BLOCK_SIZE
             else:
                 step = min(BLOCK_SIZE - len(self._header), end - pos)
-                self._header += view[pos:pos + step]
+                self._header += view[pos : pos + step]
                 pos += step
                 if len(self._header) < BLOCK_SIZE:
                     continue
@@ -598,6 +595,7 @@ class _TarWalker:
 # Compressed layer
 # --------------------------------------------------------------------------
 
+
 class _Decompressor:
     """Stream decompressor that accepts concatenated members/frames.
 
@@ -622,7 +620,7 @@ class _Decompressor:
         view = memoryview(data).cast("B")
         # Slicing the input keeps zlib's unconsumed_tail copies small.
         for start in range(0, len(view), DECOMPRESS_INPUT_SLICE):
-            self._decompress(view[start:start + DECOMPRESS_INPUT_SLICE])
+            self._decompress(view[start : start + DECOMPRESS_INPUT_SLICE])
 
     def finish(self) -> None:
         if self._decompressor is not None:
@@ -674,6 +672,7 @@ class _Decompressor:
 # --------------------------------------------------------------------------
 # Public verifier
 # --------------------------------------------------------------------------
+
 
 class StreamVerifier:
     """Verify a backup while it is downloaded; see the module docstring.

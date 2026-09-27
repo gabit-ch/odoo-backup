@@ -357,12 +357,12 @@ def describe_schedule(config: Config, slots: Sequence[Slot]) -> str:
 
 def log_config_summary(config: Config, slots: Sequence[Slot]) -> None:
     """Log the effective configuration without any secret."""
-    logger.info(
-        "odoo-backup %s (Python %s, paramiko %s)", __version__, platform.python_version(), paramiko.__version__
-    )
+    logger.info("odoo-backup %s (Python %s, paramiko %s)", __version__, platform.python_version(), paramiko.__version__)
     logger.info(
         "Odoo: %s, database %r, format %s",
-        redact(_display_url(config.odoo_url), config), config.odoo_db_name, config.backup_format,
+        redact(_display_url(config.odoo_url), config),
+        config.odoo_db_name,
+        config.backup_format,
     )
     logger.info("Schedule: %s", describe_schedule(config, slots))
     if config.sftp_host_keys:
@@ -373,7 +373,12 @@ def log_config_summary(config: Config, slots: Sequence[Slot]) -> None:
     methods = [name for name, value in credentials if value]
     logger.info(
         "SFTP: %s@%s:%d, full backups in %s, database-only backups in %s, host key %s, authentication: %s",
-        config.sftp_user, config.sftp_host, config.sftp_port, config.sftp_path, config.db_only_path, host_key,
+        config.sftp_user,
+        config.sftp_host,
+        config.sftp_port,
+        config.sftp_path,
+        config.db_only_path,
+        host_key,
         " then ".join(methods),
     )
     if config.retention is None:
@@ -392,9 +397,12 @@ def log_config_summary(config: Config, slots: Sequence[Slot]) -> None:
     full_limit = config.full_backup_max_age
     logger.info(
         "Heartbeat: %s; health check max age %s%s; max run time %s; tmp dir %s; state dir %s",
-        "configured" if config.heartbeat_url else "not configured", config.healthcheck_max_age,
+        "configured" if config.heartbeat_url else "not configured",
+        config.healthcheck_max_age,
         f" (full backups {full_limit})" if full_limit is not None else "",
-        config.max_runtime, config.tmp_dir, config.state_dir,
+        config.max_runtime,
+        config.tmp_dir,
+        config.state_dir,
     )
 
 
@@ -430,9 +438,7 @@ def run_startup_checks(
     while thread.is_alive():
         remaining = ends - time.monotonic()
         if remaining <= 0:
-            logger.warning(
-                "The start-up checks did not finish within %g s; starting the schedule anyway", deadline
-            )
+            logger.warning("The start-up checks did not finish within %g s; starting the schedule anyway", deadline)
             return
         if stop.wait(min(remaining, 0.5)):
             return
@@ -540,9 +546,7 @@ def command_check(env: Mapping[str, str]) -> int:
     def timed_out() -> None:
         print(f"FAIL check: did not finish within {CHECK_DEADLINE_SECONDS:.0f} s", flush=True)
 
-    with Watchdog(
-        CHECK_DEADLINE_SECONDS, what="The deployment check", exit_code=EXIT_FAILURE, on_timeout=timed_out
-    ):
+    with Watchdog(CHECK_DEADLINE_SECONDS, what="The deployment check", exit_code=EXIT_FAILURE, on_timeout=timed_out):
         results = run_checks(config, report=_emit_check)
     return EXIT_OK if all(result.ok for result in results) else EXIT_FAILURE
 

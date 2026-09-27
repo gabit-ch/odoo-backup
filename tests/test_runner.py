@@ -162,7 +162,8 @@ class RunnerTestCase(unittest.TestCase):
 
     def final_line(self) -> logging.LogRecord:
         finals = [
-            record for record in self.capture.records
+            record
+            for record in self.capture.records
             if record.name == LOGGER and record.getMessage().startswith(("backup finished:", "backup failed:"))
         ]
         self.assertEqual(len(finals), 1, [record.getMessage() for record in finals])
@@ -185,7 +186,7 @@ class RunnerTestCase(unittest.TestCase):
             self.assertEqual(list(self.tmp_dir.iterdir()), [])
 
     def assert_no_partial(self) -> None:
-        partials = [p for p in self.sftp_root.rglob("*.upload")]
+        partials = list(self.sftp_root.rglob("*.upload"))
         self.assertEqual(partials, [])
 
     def state(self) -> dict:
@@ -366,7 +367,8 @@ class FailedRunTests(RunnerTestCase):
                     self.assert_nothing_changed(result, "sftp-preflight")
                     self.assertIn(
                         f"SFTP_PATH '/backups' and DB_ONLY_BACKUP_PATH {spelling!r} are the same directory on the "
-                        "SFTP server (/backups)", result.error,
+                        "SFTP server (/backups)",
+                        result.error,
                     )
         self.assertEqual(self.odoo.requests, [])
 
@@ -457,8 +459,10 @@ class RetentionRunTests(RunnerTestCase):
             "keep 35 [hourly 4, daily 30, monthly 3, yearly 1], delete 686, ignored 3, future 0",
             self.messages(logging.INFO),
         )
-        self.assertIn("Retention: 3 file(s) in /backups are not backups of database 'master' and are ignored",
-                      self.messages(logging.INFO))
+        self.assertIn(
+            "Retention: 3 file(s) in /backups are not backups of database 'master' and are ignored",
+            self.messages(logging.INFO),
+        )
         self.assertEqual(len([m for m in self.messages(logging.INFO) if m.startswith("Retention: deleted ")]), 686)
         self.assertIn("retention=deleted 686/failed 0", self.final_line().getMessage())
 
@@ -478,8 +482,11 @@ class RetentionRunTests(RunnerTestCase):
         self.assertEqual(self.remote_names(), history | {result.file_name})
         self.assertEqual(result.retention, "dry-run/would-delete 19")
         (warning,) = [m for m in self.messages(logging.WARNING) if m.startswith("RETENTION_DRY_RUN")]
-        self.assertTrue(warning.startswith("RETENTION_DRY_RUN: would delete 19 backup(s) from /backups: "
-                                           "odoo19.0-master-20260925-030000.tar.gz, "))
+        self.assertTrue(
+            warning.startswith(
+                "RETENTION_DRY_RUN: would delete 19 backup(s) from /backups: odoo19.0-master-20260925-030000.tar.gz, "
+            )
+        )
         self.assertEqual(self.heartbeats(), 1)
 
     def test_dry_run_lists_at_most_fifty_names(self) -> None:
@@ -511,8 +518,9 @@ class RetentionRunTests(RunnerTestCase):
         result = self.run_backup(config=self.config(RETENTION_DRY_RUN="true"))
         self.assertTrue(result.ok, result.error)
         self.assertEqual(self.remote_names(), {result.file_name, stale})
-        self.assertIn(f"RETENTION_DRY_RUN: would remove the stale partial upload /backups/{stale}",
-                      self.messages(logging.WARNING))
+        self.assertIn(
+            f"RETENTION_DRY_RUN: would remove the stale partial upload /backups/{stale}", self.messages(logging.WARNING)
+        )
 
     def test_future_dated_backups_are_kept_with_a_warning(self) -> None:
         future = name_at(datetime.datetime(2026, 10, 5, 1))
@@ -520,8 +528,9 @@ class RetentionRunTests(RunnerTestCase):
         result = self.run_backup()
         self.assertTrue(result.ok, result.error)
         self.assertIn(future, self.remote_names())
-        self.assertTrue(any("dated more than a day in the future" in m and future in m
-                            for m in self.messages(logging.WARNING)))
+        self.assertTrue(
+            any("dated more than a day in the future" in m and future in m for m in self.messages(logging.WARNING))
+        )
 
     def test_database_only_directory_keeps_the_newest_hourly_keep(self) -> None:
         db_only = [name_at(datetime.datetime(2026, 9, 26, hour)) for hour in range(3, 24, 2)]
@@ -557,8 +566,12 @@ class RetentionRunTests(RunnerTestCase):
         result = self.run_backup(config=self.config(BACKUP_EVERY_HOUR=None, HOURLY_BACKUP_FILESTORE=None))
         self.assertTrue(result.ok, result.error)
         self.assertEqual(self.remote_names("backups/db-only"), db_only)
-        self.assertTrue(any(m.startswith("Retention for /backups/db-only (database-only backups) skipped: ")
-                            for m in self.messages(logging.INFO)))
+        self.assertTrue(
+            any(
+                m.startswith("Retention for /backups/db-only (database-only backups) skipped: ")
+                for m in self.messages(logging.INFO)
+            )
+        )
 
     def _failing_remove_factory(self, fragment: str):
         def factory(config, **kwargs):
@@ -583,8 +596,10 @@ class RetentionRunTests(RunnerTestCase):
         self.assertEqual(result.stage, "retention")
         self.assertEqual((result.deleted, result.delete_failed), (0, 5))
         self.assertEqual(result.error, "retention: 5 deletion(s) failed (aborted after repeated failures)")
-        self.assertIn("Retention in /backups aborted after 5 failed deletions in a row (14 not attempted)",
-                      self.messages(logging.WARNING))
+        self.assertIn(
+            "Retention in /backups aborted after 5 failed deletions in a row (14 not attempted)",
+            self.messages(logging.WARNING),
+        )
         self.assertEqual(self.heartbeats(), 0)
 
     def test_a_single_failed_deletion_does_not_stop_the_others(self) -> None:
@@ -681,9 +696,14 @@ class FullBackupMonitoringTests(RunnerTestCase):
         )
         ok, message = self.health()
         self.assertFalse(ok)
-        self.assertTrue(message.startswith("unhealthy: no full backup (database + filestore) since the service "
-                                           "started 1d 17h 0m ago; last failure 0m ago: full backup failed at "
-                                           "stage download"), message)
+        self.assertTrue(
+            message.startswith(
+                "unhealthy: no full backup (database + filestore) since the service "
+                "started 1d 17h 0m ago; last failure 0m ago: full backup failed at "
+                "stage download"
+            ),
+            message,
+        )
 
         # The next full backup succeeds: heartbeat and health recover.
         self.full_backups_fail = False
@@ -706,8 +726,11 @@ class FullBackupMonitoringTests(RunnerTestCase):
         self.now += datetime.timedelta(hours=37)
         self.assertFalse(self.run_backup(full=True, config=self.cfg).ok)
         self.assertFalse(self.run_backup(full=False, config=self.cfg).heartbeat_sent)
-        self.assertIn("Heartbeat ping not sent: last full backup (database + filestore) 1d 13h 0m ago, more than "
-                      "the allowed 1d 12h 0m", self.messages(logging.WARNING))
+        self.assertIn(
+            "Heartbeat ping not sent: last full backup (database + filestore) 1d 13h 0m ago, more than "
+            "the allowed 1d 12h 0m",
+            self.messages(logging.WARNING),
+        )
         self.assertFalse(self.health()[0])
 
     def test_all_full_slots_keep_the_old_heartbeat_rule(self) -> None:
@@ -720,15 +743,15 @@ class FullBackupMonitoringTests(RunnerTestCase):
 class WatchdogTests(unittest.TestCase):
     def test_fires_after_the_limit(self) -> None:
         exits: list[int] = []
-        with self.assertLogs(LOGGER, logging.CRITICAL) as logs:
-            with Watchdog(0.05, exit_func=exits.append) as watchdog:
-                self.assertTrue(watchdog.fired.wait(5))
-                deadline = time.monotonic() + 5
-                while not exits and time.monotonic() < deadline:
-                    time.sleep(0.01)
+        with self.assertLogs(LOGGER, logging.CRITICAL) as logs, Watchdog(0.05, exit_func=exits.append) as watchdog:
+            self.assertTrue(watchdog.fired.wait(5))
+            deadline = time.monotonic() + 5
+            while not exits and time.monotonic() < deadline:
+                time.sleep(0.01)
         self.assertEqual(exits, [3])
-        self.assertIn("The backup run did not finish within 0:00:00; terminating the process with exit code 3",
-                      logs.output[0])
+        self.assertIn(
+            "The backup run did not finish within 0:00:00; terminating the process with exit code 3", logs.output[0]
+        )
 
     def test_leaving_the_block_disarms_it(self) -> None:
         exits: list[int] = []

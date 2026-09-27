@@ -149,8 +149,17 @@ class DefaultsTest(ConfigTestCase):
 
     def test_empty_values_count_as_unset(self):
         config = load(ODOO_BACKUP_FORMAT="", BACKUP_TIME=" ", SFTP_PORT="", SFTP_PATH="", TZ="", SFTP_HOST_KEY="")
-        self.assertEqual((config.backup_format, config.backup_time, config.sftp_port, config.sftp_path, config.tz_name,
-                          config.sftp_host_keys), ("zip", time(2), 22, "/", "UTC", ()))
+        self.assertEqual(
+            (
+                config.backup_format,
+                config.backup_time,
+                config.sftp_port,
+                config.sftp_path,
+                config.tz_name,
+                config.sftp_host_keys,
+            ),
+            ("zip", time(2), 22, "/", "UTC", ()),
+        )
 
 
 class ProblemsTest(ConfigTestCase):
@@ -158,10 +167,18 @@ class ProblemsTest(ConfigTestCase):
         with self.assertRaises(ConfigError) as ctx:
             load_config({"ODOO_BACKUP_FORMAT": "rar", "BACKUP_TIME": "25:00", "SFTP_PORT": "0", "TZ": "Mars/Base"})
         problems = ctx.exception.problems
-        for fragment in ("ODOO_URL is required", "ODOO_MASTER_PWD or ODOO_MASTER_PWD_FILE is required",
-                         "ODOO_DB_NAME is required", "SFTP_HOST is required", "SFTP_USER is required",
-                         "SFTP_PASSWORD, SFTP_PASSWORD_FILE or SFTP_PRIVATE_KEY_FILE is required",
-                         "ODOO_BACKUP_FORMAT", "BACKUP_TIME", "SFTP_PORT", "TZ"):
+        for fragment in (
+            "ODOO_URL is required",
+            "ODOO_MASTER_PWD or ODOO_MASTER_PWD_FILE is required",
+            "ODOO_DB_NAME is required",
+            "SFTP_HOST is required",
+            "SFTP_USER is required",
+            "SFTP_PASSWORD, SFTP_PASSWORD_FILE or SFTP_PRIVATE_KEY_FILE is required",
+            "ODOO_BACKUP_FORMAT",
+            "BACKUP_TIME",
+            "SFTP_PORT",
+            "TZ",
+        ):
             self.assertTrue(any(fragment in p for p in problems), f"{fragment!r} not in {problems}")
         self.assertEqual(len(problems), 10)
         self.assertIsInstance(ctx.exception, ValueError)
@@ -174,15 +191,25 @@ class ProblemsTest(ConfigTestCase):
         heartbeat = "https://hc-ping.example/secret-token-99"
         key_passphrase = "key-passphrase-77"
         with self.assertLogs(LOGGER, "WARNING") as logs, self.assertRaises(ConfigError) as ctx:
-            load(ODOO_MASTER_PWD_FILE="/nonexistent/master", SFTP_PASSWORD_FILE="/nonexistent/sftp",
-                 HEARTBEAT_URL=heartbeat, HEARTBEAT_URL_FILE="/nonexistent/hb",
-                 SFTP_PRIVATE_KEY_PASSPHRASE=key_passphrase, ODOO_URL="htp://admin:url-secret-5@odoo",
-                 BACKUP_EVERY_HOUR="5", HOURLY_BACKUP_KEEP="x", SFTP_HOST="host:2222")
+            load(
+                ODOO_MASTER_PWD_FILE="/nonexistent/master",
+                SFTP_PASSWORD_FILE="/nonexistent/sftp",
+                HEARTBEAT_URL=heartbeat,
+                HEARTBEAT_URL_FILE="/nonexistent/hb",
+                SFTP_PRIVATE_KEY_PASSPHRASE=key_passphrase,
+                ODOO_URL="htp://admin:url-secret-5@odoo",
+                BACKUP_EVERY_HOUR="5",
+                HOURLY_BACKUP_KEEP="x",
+                SFTP_HOST="host:2222",
+            )
         text = "\n".join([str(ctx.exception), *ctx.exception.problems, *logs.output])
         for secret in (MASTER_PWD, SFTP_PWD, heartbeat, "secret-token-99", key_passphrase, "url-secret-5"):
             self.assertNotIn(secret, text)
-        config = load(HEARTBEAT_URL=heartbeat, SFTP_PRIVATE_KEY_PASSPHRASE=key_passphrase,
-                      SFTP_PRIVATE_KEY_FILE=self.temp_file("KEY"))
+        config = load(
+            HEARTBEAT_URL=heartbeat,
+            SFTP_PRIVATE_KEY_PASSPHRASE=key_passphrase,
+            SFTP_PRIVATE_KEY_FILE=self.temp_file("KEY"),
+        )
         for secret in (MASTER_PWD, SFTP_PWD, heartbeat, key_passphrase):
             self.assertNotIn(secret, repr(config))
             self.assertNotIn(secret, str(config))
@@ -195,8 +222,13 @@ class SecretsTest(ConfigTestCase):
         self.assertIsNone(read_secret({"X": "", "X_FILE": ""}, "X"))
 
     def test_file_value_loses_only_the_trailing_line_break(self):
-        for content, expected in (("pw\n", "pw"), ("pw\r\n", "pw"), (" pw \n", " pw "), ("pw", "pw"),
-                                  ("line1\nline2\n", "line1\nline2")):
+        for content, expected in (
+            ("pw\n", "pw"),
+            ("pw\r\n", "pw"),
+            (" pw \n", " pw "),
+            ("pw", "pw"),
+            ("line1\nline2\n", "line1\nline2"),
+        ):
             with self.subTest(content=content):
                 self.assertEqual(read_secret({"X_FILE": self.temp_file(content)}, "X"), expected)
 
@@ -208,19 +240,29 @@ class SecretsTest(ConfigTestCase):
     def test_unreadable_or_empty_files_are_problems(self):
         directory = tempfile.mkdtemp()
         self.addCleanup(os.rmdir, directory)
-        for path, fragment in (("/nonexistent/secret", "cannot read"), (directory, "cannot read"),
-                               (self.temp_file(b"\xff\xfe"), "cannot read"), (self.temp_file("\n"), "is empty")):
+        for path, fragment in (
+            ("/nonexistent/secret", "cannot read"),
+            (directory, "cannot read"),
+            (self.temp_file(b"\xff\xfe"), "cannot read"),
+            (self.temp_file("\n"), "is empty"),
+        ):
             with self.subTest(path=path), self.assertRaises(ConfigError) as ctx:
                 read_secret({"X_FILE": path}, "X")
             self.assertIn(fragment, ctx.exception.problems[0])
             self.assertTrue(ctx.exception.problems[0].startswith("X_FILE: "))
 
     def test_file_variants_in_load_config(self):
-        config = load(ODOO_MASTER_PWD=None, ODOO_MASTER_PWD_FILE=self.temp_file("m\n"),
-                      SFTP_PASSWORD=None, SFTP_PASSWORD_FILE=self.temp_file("s\n"),
-                      HEARTBEAT_URL_FILE=self.temp_file("https://hc.example/ping/abc\n"))
-        self.assertEqual((config.odoo_master_password, config.sftp_password, config.heartbeat_url),
-                         ("m", "s", "https://hc.example/ping/abc"))
+        config = load(
+            ODOO_MASTER_PWD=None,
+            ODOO_MASTER_PWD_FILE=self.temp_file("m\n"),
+            SFTP_PASSWORD=None,
+            SFTP_PASSWORD_FILE=self.temp_file("s\n"),
+            HEARTBEAT_URL_FILE=self.temp_file("https://hc.example/ping/abc\n"),
+        )
+        self.assertEqual(
+            (config.odoo_master_password, config.sftp_password, config.heartbeat_url),
+            ("m", "s", "https://hc.example/ping/abc"),
+        )
 
     def test_unreadable_secret_file_is_reported_once(self):
         problems = self.problems(ODOO_MASTER_PWD=None, ODOO_MASTER_PWD_FILE="/nonexistent/x")
@@ -254,8 +296,13 @@ class ParseBoolTest(ConfigTestCase):
 
 class ScheduleSettingsTest(ConfigTestCase):
     def test_backup_time_formats(self):
-        for raw, expected in (("1:00", time(1)), ("01:00", time(1)), ("23:59:59", time(23, 59, 59)),
-                              ("00:00", time(0)), ("7:05:09", time(7, 5, 9))):
+        for raw, expected in (
+            ("1:00", time(1)),
+            ("01:00", time(1)),
+            ("23:59:59", time(23, 59, 59)),
+            ("00:00", time(0)),
+            ("7:05:09", time(7, 5, 9)),
+        ):
             with self.subTest(raw=raw):
                 self.assertEqual(load(BACKUP_TIME=raw).backup_time, expected)
         for raw in ("24:00", "1:60", "0100", "01:00:60", "1", "01:00 am", "-1:00", "1:5", "001:00"):
@@ -274,9 +321,11 @@ class ScheduleSettingsTest(ConfigTestCase):
     def test_interval_not_dividing_24_is_a_warning(self):
         with self.assertLogs(LOGGER, "WARNING") as logs:
             self.assertEqual(load(BACKUP_EVERY_HOUR="5").backup_every_hour, 5)
-        self.assertEqual(logs.records[0].getMessage(),
-                         "BACKUP_EVERY_HOUR=5 does not divide 24: 4 backups per day, the gap before the first "
-                         "backup of the next day is 9 h")
+        self.assertEqual(
+            logs.records[0].getMessage(),
+            "BACKUP_EVERY_HOUR=5 does not divide 24: 4 backups per day, the gap before the first "
+            "backup of the next day is 9 h",
+        )
         with self.assertNoLogs(LOGGER, "WARNING"):
             load(BACKUP_EVERY_HOUR="3")
 
@@ -301,13 +350,23 @@ class RetentionSettingsTest(ConfigTestCase):
 
     def test_hourly_mode_uses_hourly_keep(self):
         self.assertEqual(load(BACKUP_EVERY_HOUR="2").retention.keep_last, 4)
-        config = load(BACKUP_EVERY_HOUR="2", BACKUP_TIME="01:00", HOURLY_BACKUP_KEEP="12", DAILY_BACKUP_KEEP="30",
-                      MONTHLY_BACKUP_KEEP="12", YEARLY_BACKUP_KEEP="-1")
+        config = load(
+            BACKUP_EVERY_HOUR="2",
+            BACKUP_TIME="01:00",
+            HOURLY_BACKUP_KEEP="12",
+            DAILY_BACKUP_KEEP="30",
+            MONTHLY_BACKUP_KEEP="12",
+            YEARLY_BACKUP_KEEP="-1",
+        )
         self.assertEqual(config.retention, RetentionPolicy(12, 30, 12, -1, time(1)))
 
     def test_invalid_values_disable_retention_without_failing(self):
-        for name, raw in (("HOURLY_BACKUP_KEEP", "-1"), ("DAILY_BACKUP_KEEP", "x"), ("MONTHLY_BACKUP_KEEP", "1.5"),
-                          ("YEARLY_BACKUP_KEEP", "-2")):
+        for name, raw in (
+            ("HOURLY_BACKUP_KEEP", "-1"),
+            ("DAILY_BACKUP_KEEP", "x"),
+            ("MONTHLY_BACKUP_KEEP", "1.5"),
+            ("YEARLY_BACKUP_KEEP", "-2"),
+        ):
             with self.subTest(name=name), self.assertLogs(LOGGER, "WARNING") as logs:
                 config = load(**{name: raw})
             self.assertIsNone(config.retention)
@@ -321,11 +380,18 @@ class RetentionSettingsTest(ConfigTestCase):
 
     def test_all_effective_values_zero_disable_retention(self):
         with self.assertLogs(LOGGER, "WARNING"):
-            config = load(HOURLY_BACKUP_KEEP="5", DAILY_BACKUP_KEEP="0", MONTHLY_BACKUP_KEEP="0", YEARLY_BACKUP_KEEP="0")
+            config = load(
+                HOURLY_BACKUP_KEEP="5", DAILY_BACKUP_KEEP="0", MONTHLY_BACKUP_KEEP="0", YEARLY_BACKUP_KEEP="0"
+            )
         self.assertIsNone(config.retention)
         self.assertIn("all effective retention values are 0", config.retention_errors[0])
-        hourly = load(BACKUP_EVERY_HOUR="2", HOURLY_BACKUP_KEEP="5", DAILY_BACKUP_KEEP="0", MONTHLY_BACKUP_KEEP="0",
-                      YEARLY_BACKUP_KEEP="0")
+        hourly = load(
+            BACKUP_EVERY_HOUR="2",
+            HOURLY_BACKUP_KEEP="5",
+            DAILY_BACKUP_KEEP="0",
+            MONTHLY_BACKUP_KEEP="0",
+            YEARLY_BACKUP_KEEP="0",
+        )
         self.assertEqual(hourly.retention, RetentionPolicy(5, 0, 0, 0, time(2)))
 
     def test_yearly_values(self):
@@ -378,8 +444,9 @@ class SftpSettingsTest(ConfigTestCase):
         self.assertIn("deprecated", logs.output[0])
         with self.assertLogs(LOGGER, "WARNING"):
             self.assertEqual(load(SFTP_HOST="backup.example.com:23", SFTP_PORT="23").sftp_port, 23)
-        self.assertProblem("SFTP_HOST contains port 23 but SFTP_PORT is 22", SFTP_HOST="backup.example.com:23",
-                           SFTP_PORT="22")
+        self.assertProblem(
+            "SFTP_HOST contains port 23 but SFTP_PORT is 22", SFTP_HOST="backup.example.com:23", SFTP_PORT="22"
+        )
         for raw in ("backup.example.com:ssh", ":22", "backup.example.com:0", "backup.example.com:99999"):
             with self.subTest(raw=raw):
                 self.assertProblem("is not a host name", SFTP_HOST=raw)
@@ -393,14 +460,18 @@ class SftpSettingsTest(ConfigTestCase):
     def test_private_key_file(self):
         key_file = self.temp_file("-----BEGIN OPENSSH PRIVATE KEY-----\n")
         config = load(SFTP_PASSWORD=None, SFTP_PRIVATE_KEY_FILE=key_file, SFTP_PRIVATE_KEY_PASSPHRASE="pp")
-        self.assertEqual((config.sftp_password, config.sftp_private_key_file, config.sftp_private_key_passphrase),
-                         (None, key_file, "pp"))
-        self.assertProblem("SFTP_PRIVATE_KEY_FILE: cannot read '/nonexistent/id_ed25519'",
-                           SFTP_PRIVATE_KEY_FILE="/nonexistent/id_ed25519")
-        self.assertProblem("SFTP_PRIVATE_KEY_PASSPHRASE is set but SFTP_PRIVATE_KEY_FILE is not",
-                           SFTP_PRIVATE_KEY_PASSPHRASE="pp")
-        self.assertProblem("SFTP_PASSWORD, SFTP_PASSWORD_FILE or SFTP_PRIVATE_KEY_FILE is required",
-                           SFTP_PASSWORD=None)
+        self.assertEqual(
+            (config.sftp_password, config.sftp_private_key_file, config.sftp_private_key_passphrase),
+            (None, key_file, "pp"),
+        )
+        self.assertProblem(
+            "SFTP_PRIVATE_KEY_FILE: cannot read '/nonexistent/id_ed25519'",
+            SFTP_PRIVATE_KEY_FILE="/nonexistent/id_ed25519",
+        )
+        self.assertProblem(
+            "SFTP_PRIVATE_KEY_PASSPHRASE is set but SFTP_PRIVATE_KEY_FILE is not", SFTP_PRIVATE_KEY_PASSPHRASE="pp"
+        )
+        self.assertProblem("SFTP_PASSWORD, SFTP_PASSWORD_FILE or SFTP_PRIVATE_KEY_FILE is required", SFTP_PASSWORD=None)
 
     def test_paths(self):
         config = load(SFTP_PATH="/backups/odoo")
@@ -409,8 +480,9 @@ class SftpSettingsTest(ConfigTestCase):
         self.assertEqual(load(DB_ONLY_BACKUP_PATH="/hourly").db_only_path, "/hourly")
         for sftp_path, db_only in (("/backups/odoo/", "/backups/odoo"), ("/", "/"), ("backups", "./backups")):
             with self.subTest(sftp_path=sftp_path, db_only=db_only):
-                self.assertProblem("DB_ONLY_BACKUP_PATH must differ from SFTP_PATH",
-                                   SFTP_PATH=sftp_path, DB_ONLY_BACKUP_PATH=db_only)
+                self.assertProblem(
+                    "DB_ONLY_BACKUP_PATH must differ from SFTP_PATH", SFTP_PATH=sftp_path, DB_ONLY_BACKUP_PATH=db_only
+                )
 
     def test_ciphers(self):
         config = load(SFTP_CIPHERS=" aes256-gcm@openssh.com , aes128-ctr,,aes128-ctr ")
@@ -426,8 +498,9 @@ class SftpSettingsTest(ConfigTestCase):
         for raw in ("0", "11", "x"):
             self.assertProblem("SFTP_UPLOAD_ATTEMPTS must be an integer between 1 and 10", SFTP_UPLOAD_ATTEMPTS=raw)
         for raw in ("4095", "262144", "auto"):
-            self.assertProblem("SFTP_MAX_REQUEST_SIZE must be an integer between 4096 and 261120",
-                               SFTP_MAX_REQUEST_SIZE=raw)
+            self.assertProblem(
+                "SFTP_MAX_REQUEST_SIZE must be an integer between 4096 and 261120", SFTP_MAX_REQUEST_SIZE=raw
+            )
 
 
 class HostKeyTest(ConfigTestCase):
@@ -445,20 +518,27 @@ class HostKeyTest(ConfigTestCase):
 
     def test_public_key_forms(self):
         expected = f"ssh-ed25519 {self.ED25519}"
-        for raw in (expected, f"ssh-ed25519 {self.ED25519} root@backup", f"[backup.example.com]:23 ssh-ed25519 {self.ED25519}",
-                    f"backup.example.com,1.2.3.4 ssh-ed25519 {self.ED25519}",
-                    f"|1|c2FsdA==|aGFzaA== ssh-ed25519 {self.ED25519} comment with spaces"):
+        for raw in (
+            expected,
+            f"ssh-ed25519 {self.ED25519} root@backup",
+            f"[backup.example.com]:23 ssh-ed25519 {self.ED25519}",
+            f"backup.example.com,1.2.3.4 ssh-ed25519 {self.ED25519}",
+            f"|1|c2FsdA==|aGFzaA== ssh-ed25519 {self.ED25519} comment with spaces",
+        ):
             with self.subTest(raw=raw):
                 self.assertEqual(parse_host_keys(raw), (expected,))
 
     def test_separators_comments_and_duplicates(self):
         fp = fingerprint(self.RSA)
-        raw = (f"# ssh-keyscan -p 23 backup.example.com\n"
-               f"backup.example.com ssh-rsa {self.RSA}\r\n"
-               f"{fp}, ecdsa-sha2-nistp256 {self.ECDSA} ,\n\n"
-               f"ssh-rsa {self.RSA} again")
-        self.assertEqual(load(SFTP_HOST_KEY=raw).sftp_host_keys,
-                         (f"ssh-rsa {self.RSA}", fp, f"ecdsa-sha2-nistp256 {self.ECDSA}"))
+        raw = (
+            f"# ssh-keyscan -p 23 backup.example.com\n"
+            f"backup.example.com ssh-rsa {self.RSA}\r\n"
+            f"{fp}, ecdsa-sha2-nistp256 {self.ECDSA} ,\n\n"
+            f"ssh-rsa {self.RSA} again"
+        )
+        self.assertEqual(
+            load(SFTP_HOST_KEY=raw).sftp_host_keys, (f"ssh-rsa {self.RSA}", fp, f"ecdsa-sha2-nistp256 {self.ECDSA}")
+        )
 
     def test_invalid_entries_are_all_reported(self):
         cases = {
@@ -499,8 +579,11 @@ class LocalSettingsTest(ConfigTestCase):
                 self.assertProblem("BACKUP_TMP_DIR must be a dedicated directory", BACKUP_TMP_DIR=tmp_dir)
         for state_dir in (f"{base}/tmp", f"{base}/tmp/state"):
             with self.subTest(state_dir=state_dir):
-                self.assertProblem("BACKUP_STATE_DIR must not be inside BACKUP_TMP_DIR",
-                                   BACKUP_TMP_DIR=f"{base}/tmp", BACKUP_STATE_DIR=state_dir)
+                self.assertProblem(
+                    "BACKUP_STATE_DIR must not be inside BACKUP_TMP_DIR",
+                    BACKUP_TMP_DIR=f"{base}/tmp",
+                    BACKUP_STATE_DIR=state_dir,
+                )
 
     def test_max_runtime(self):
         self.assertEqual(load(BACKUP_MAX_RUNTIME_MINUTES="10").max_runtime, timedelta(minutes=10))

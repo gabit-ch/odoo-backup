@@ -16,7 +16,7 @@ import logging
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -58,10 +58,7 @@ def build_slots(backup_time: time, every_hours: int | None, hourly_filestore: bo
     if not isinstance(every_hours, int) or isinstance(every_hours, bool) or not 1 <= every_hours <= 24:
         raise ValueError(f"every_hours must be an integer between 1 and 24, got {every_hours!r}")
     hours = sorted({(backup_time.hour + i * every_hours) % 24 for i in range(24 // every_hours)})
-    return [
-        Slot(backup_time.replace(hour=hour), hour == backup_time.hour or hourly_filestore)
-        for hour in hours
-    ]
+    return [Slot(backup_time.replace(hour=hour), hour == backup_time.hour or hourly_filestore) for hour in hours]
 
 
 def next_run_after(now: datetime, slots: Sequence[Slot], tz: ZoneInfo) -> tuple[datetime, Slot]:
@@ -84,7 +81,7 @@ def next_run_after(now: datetime, slots: Sequence[Slot], tz: ZoneInfo) -> tuple[
     for offset in range(-1, 3):
         day = local_day + timedelta(days=offset)
         for slot in slots:
-            instant = datetime.combine(day, slot.at, tzinfo=tz).astimezone(timezone.utc)
+            instant = datetime.combine(day, slot.at, tzinfo=tz).astimezone(UTC)
             if instant <= now:
                 continue
             if best is None or instant < best[0] or (instant == best[0] and slot.full and not best[1].full):
@@ -113,7 +110,7 @@ def run_forever(
     slots: Sequence[Slot],
     tz: ZoneInfo,
     stop: threading.Event,
-    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     max_sleep: float = 60.0,
 ) -> None:
     """Run ``job(slot)`` at every slot until ``stop`` is set.
@@ -146,7 +143,9 @@ def run_forever(
         if late > timedelta(seconds=max_sleep) + _LATE_TOLERANCE:
             logger.warning(
                 "Starting the %s backup planned for %s %s late (process suspended or clock changed?)",
-                slot.kind, next_at.astimezone(tz).isoformat(), late,
+                slot.kind,
+                next_at.astimezone(tz).isoformat(),
+                late,
             )
         try:
             job(slot)
@@ -160,7 +159,9 @@ def run_forever(
         if skipped:
             logger.warning(
                 "Skipped %d backup slot(s): the run planned for %s ended at %s",
-                skipped, next_at.astimezone(tz).isoformat(), finished.astimezone(tz).isoformat(),
+                skipped,
+                next_at.astimezone(tz).isoformat(),
+                finished.astimezone(tz).isoformat(),
             )
         next_at, slot = following_at, following_slot
         _log_next(next_at, slot, tz)

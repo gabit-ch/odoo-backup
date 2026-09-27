@@ -14,7 +14,7 @@ import unittest
 
 import paramiko
 
-from odoo_backup import sftp
+from odoo_backup import retention, sftp
 from odoo_backup.sftp import (
     DEFAULT_REQUEST_SIZE,
     MAX_REQUEST_SIZE_CAP,
@@ -185,7 +185,11 @@ class ConnectTests(StubTestCase):
 
     def test_configured_cipher_preference(self) -> None:
         default_config = (
-            "aes128-gcm@openssh.com", "aes256-gcm@openssh.com", "aes128-ctr", "aes256-ctr", "aes192-ctr",
+            "aes128-gcm@openssh.com",
+            "aes256-gcm@openssh.com",
+            "aes128-ctr",
+            "aes256-ctr",
+            "aes192-ctr",
         )
         for ciphers, expected in ((default_config, "aes128-gcm@openssh.com"), (("aes256-ctr",), "aes256-ctr")):
             with self.subTest(ciphers=ciphers), self.connection(ciphers=ciphers) as conn:
@@ -329,9 +333,8 @@ class ConnectTests(StubTestCase):
         thread.start()
         conn = self.connection(port=listener.getsockname()[1])
         # paramiko's client transport thread logs the banner error (with traceback) itself.
-        with self.assertLogs("paramiko.transport", logging.ERROR):
-            with self.assertRaisesRegex(SFTPError, "SSH handshake"):
-                conn.connect()
+        with self.assertLogs("paramiko.transport", logging.ERROR), self.assertRaisesRegex(SFTPError, "SSH handshake"):
+            conn.connect()
         thread.join(5)
 
     def test_reconnects_after_the_server_dropped_the_session(self) -> None:
@@ -381,8 +384,11 @@ class MultipleHostKeyTests(StubTestCase):
 
     def test_pinned_rsa_public_key_is_negotiated(self) -> None:
         rsa_line = _public_line(self.rsa_key)
-        for host_keys in ((rsa_line,), (f"[127.0.0.1]:{self.multi.port} {rsa_line}",),
-                          (fingerprint(generate_ed25519_key()), rsa_line)):
+        for host_keys in (
+            (rsa_line,),
+            (f"[127.0.0.1]:{self.multi.port} {rsa_line}",),
+            (fingerprint(generate_ed25519_key()), rsa_line),
+        ):
             with self.subTest(host_keys=host_keys), self.connection(self.multi, host_keys=host_keys) as conn:
                 self.assertEqual(conn.server_key_type, "ssh-rsa")
                 self.assertEqual(conn.server_fingerprint, fingerprint(self.rsa_key))
@@ -493,9 +499,7 @@ class FileOperationTests(StubTestCase):
 
 
 class UploadTests(StubTestCase):
-    def upload(
-        self, local: pathlib.Path, conn: SFTPConnection | None = None, **kwargs: object
-    ) -> sftp.UploadResult:
+    def upload(self, local: pathlib.Path, conn: SFTPConnection | None = None, **kwargs: object) -> sftp.UploadResult:
         conn = conn or self.connection()
         kwargs.setdefault("attempts", 3)
         return conn.upload(local, "/backups", "odoo19.0-master-20260927-010000.tar.gz", **kwargs)
@@ -584,9 +588,11 @@ class UploadTests(StubTestCase):
         # that SFTPFile.close() would silently discard.
         local = self.local_file(96 * REQ + 12345)
         self.stub.fail_write_at = 90 * REQ
-        with self.assertLogs(LOGGER, logging.WARNING) as logs:
-            with self.assertRaisesRegex(UploadError, "rejected a write") as caught:
-                self.upload(local)
+        with (
+            self.assertLogs(LOGGER, logging.WARNING) as logs,
+            self.assertRaisesRegex(UploadError, "rejected a write") as caught,
+        ):
+            self.upload(local)
         self.assert_attempt_warnings(logs.records, 3, "rejected a write")
         self.assertIn("after 3 attempt(s)", str(caught.exception))
         self.assertEqual(self.sleeps, [5.0, 10.0])
@@ -602,9 +608,8 @@ class UploadTests(StubTestCase):
         local = self.local_file(size)
         self.stub.fail_write_at = 95 * REQ
         self.stub.fail_write_span = REQ
-        with self.assertLogs(LOGGER, logging.WARNING) as logs:
-            with self.assertRaisesRegex(UploadError, "rejected a write"):
-                self.upload(local, attempts=1)
+        with self.assertLogs(LOGGER, logging.WARNING) as logs, self.assertRaisesRegex(UploadError, "rejected a write"):
+            self.upload(local, attempts=1)
         self.assert_attempt_warnings(logs.records, 1, "rejected a write")
         self.assertFalse(self.final.exists())
         self.assertFalse(self.partial.exists())
@@ -643,9 +648,8 @@ class UploadTests(StubTestCase):
 
     def test_rename_failure_fails_the_upload_and_removes_the_partial_file(self) -> None:
         self.stub.fail_rename = True
-        with self.assertLogs(LOGGER, logging.WARNING) as logs:
-            with self.assertRaises(UploadError):
-                self.upload(self.local_file(100_000))
+        with self.assertLogs(LOGGER, logging.WARNING) as logs, self.assertRaises(UploadError):
+            self.upload(self.local_file(100_000))
         self.assert_attempt_warnings(logs.records, 3, "Failure")
         self.assertEqual(self.sleeps, [5.0, 10.0])
         self.assertFalse(self.final.exists())
@@ -664,9 +668,8 @@ class UploadTests(StubTestCase):
 
     def test_upload_into_missing_directory_fails_after_all_attempts(self) -> None:
         conn = self.connection()
-        with self.assertLogs(LOGGER, logging.WARNING) as logs:
-            with self.assertRaisesRegex(UploadError, "after 2 attempt"):
-                conn.upload(self.local_file(10), "/missing", "x.zip", attempts=2)
+        with self.assertLogs(LOGGER, logging.WARNING) as logs, self.assertRaisesRegex(UploadError, "after 2 attempt"):
+            conn.upload(self.local_file(10), "/missing", "x.zip", attempts=2)
         self.assert_attempt_warnings(logs.records, 2, "No such file")
         self.assertEqual(self.sleeps, [5.0])
 
@@ -692,17 +695,12 @@ class UploadTests(StubTestCase):
 
     def test_password_never_appears_in_logs_or_errors(self) -> None:
         self.stub.fail_rename = True
-        with self.assertLogs(level=logging.DEBUG) as logs:
-            with self.assertRaises(UploadError) as caught:
-                self.upload(self.local_file(100_000))
+        with self.assertLogs(level=logging.DEBUG) as logs, self.assertRaises(UploadError) as caught:
+            self.upload(self.local_file(100_000))
         self.assertNotIn(self.stub.password, str(caught.exception))
         self.assertFalse(any(self.stub.password in line for line in logs.output))
 
     def test_partial_suffix_matches_retention(self) -> None:
-        try:
-            from odoo_backup import retention
-        except ImportError:  # part A not present yet
-            self.skipTest("odoo_backup.retention is not available")
         self.assertEqual(PARTIAL_SUFFIX, retention.PARTIAL_SUFFIX)
 
 

@@ -152,8 +152,14 @@ class StateStoreTests(unittest.TestCase):
 
     def test_corrupt_or_malformed_files_are_ignored_with_a_warning(self) -> None:
         self.directory.mkdir()
-        for content in ("{not json", "[]", '{"started_at": 5}', '{"started_at": "2026-09-27T01:00:00"}',
-                        '{"last_error": 7}', '{"started_at": "yesterday"}'):
+        for content in (
+            "{not json",
+            "[]",
+            '{"started_at": 5}',
+            '{"started_at": "2026-09-27T01:00:00"}',
+            '{"last_error": 7}',
+            '{"started_at": "yesterday"}',
+        ):
             with self.subTest(content=content):
                 self.store.path.write_text(content)
                 with self.assertLogs(LOGGER, logging.WARNING) as logs:
@@ -162,17 +168,21 @@ class StateStoreTests(unittest.TestCase):
 
     def test_failed_save_keeps_the_old_file_and_leaves_no_temporary_file(self) -> None:
         self.store.record_success(T0, "old.tar.gz")
-        with mock.patch.object(state_module.os, "replace", side_effect=OSError(28, "No space left on device")):
-            with self.assertRaises(OSError):
-                self.store.record_success(T0 + HOUR, "new.tar.gz")
+        with (
+            mock.patch.object(state_module.os, "replace", side_effect=OSError(28, "No space left on device")),
+            self.assertRaises(OSError),
+        ):
+            self.store.record_success(T0 + HOUR, "new.tar.gz")
         self.assertEqual(self.store.load().last_success_file, "old.tar.gz")
         self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["state.json"])
 
     def test_run_lock_is_exclusive_and_released(self) -> None:
-        with self.store.run_lock():
-            with self.assertRaisesRegex(RunLockedError, "another backup run is in progress"):
-                with self.store.run_lock():
-                    pass
+        with (
+            self.store.run_lock(),
+            self.assertRaisesRegex(RunLockedError, "another backup run is in progress"),
+            self.store.run_lock(),
+        ):
+            pass
         with self.store.run_lock():  # released after the block
             pass
         with self.assertRaises(ValueError), self.store.run_lock():
@@ -241,8 +251,10 @@ class FullBackupHealthTests(unittest.TestCase):
     def test_fresh_full_and_database_only_backups_are_healthy(self) -> None:
         state = State(
             started_at=T0 - 48 * HOUR,
-            last_success_at=T0 - HOUR, last_success_file="db.tar.gz",
-            last_full_success_at=T0 - 12 * HOUR, last_full_success_file="full.tar.gz",
+            last_success_at=T0 - HOUR,
+            last_success_file="db.tar.gz",
+            last_full_success_at=T0 - 12 * HOUR,
+            last_full_success_file="full.tar.gz",
         )
         self.assertEqual(
             self.status(state),
@@ -252,14 +264,20 @@ class FullBackupHealthTests(unittest.TestCase):
     def test_overdue_full_backup_is_unhealthy_despite_database_only_successes(self) -> None:
         state = State(
             started_at=T0 - 30 * 24 * HOUR,
-            last_success_at=T0 - HOUR, last_success_file="db.tar.gz",
-            last_full_success_at=T0 - 60 * HOUR, last_full_success_file="full.tar.gz",
-            last_failure_at=T0 - 24 * HOUR, last_error="full backup failed at stage download: truncated",
+            last_success_at=T0 - HOUR,
+            last_success_file="db.tar.gz",
+            last_full_success_at=T0 - 60 * HOUR,
+            last_full_success_file="full.tar.gz",
+            last_failure_at=T0 - 24 * HOUR,
+            last_error="full backup failed at stage download: truncated",
         )
         self.assertEqual(
             self.status(state),
-            (False, "unhealthy: last full backup (database + filestore) 2d 12h 0m ago, more than the allowed "
-                    "1d 12h 0m; last failure 1d 0h 0m ago: full backup failed at stage download: truncated"),
+            (
+                False,
+                "unhealthy: last full backup (database + filestore) 2d 12h 0m ago, more than the allowed "
+                "1d 12h 0m; last failure 1d 0h 0m ago: full backup failed at stage download: truncated",
+            ),
         )
 
     def test_first_full_backup_gets_the_start_up_grace_period(self) -> None:
@@ -274,12 +292,14 @@ class FullBackupHealthTests(unittest.TestCase):
     def test_without_a_limit_only_the_last_success_counts(self) -> None:
         state = State(last_success_at=T0 - HOUR, last_success_file="db.tar.gz")
         self.assertTrue(health_status(state, T0, self.MAX_AGE)[0])
-        self.assertEqual(full_backup_problem(state, T0, self.FULL_MAX_AGE),
-                         "no full backup (database + filestore) recorded yet")
+        self.assertEqual(
+            full_backup_problem(state, T0, self.FULL_MAX_AGE), "no full backup (database + filestore) recorded yet"
+        )
 
     def test_full_backup_problem(self) -> None:
-        self.assertIsNone(full_backup_problem(State(last_full_success_at=T0 - self.FULL_MAX_AGE), T0,
-                                              self.FULL_MAX_AGE))
+        self.assertIsNone(
+            full_backup_problem(State(last_full_success_at=T0 - self.FULL_MAX_AGE), T0, self.FULL_MAX_AGE)
+        )
         self.assertIsNone(full_backup_problem(State(started_at=T0 - HOUR), T0, self.FULL_MAX_AGE))
 
 

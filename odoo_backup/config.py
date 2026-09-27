@@ -42,13 +42,15 @@ DEFAULT_SFTP_CIPHERS = (
     "aes192-ctr",
 )
 # Host key types paramiko 5 can verify.
-HOST_KEY_TYPES = frozenset({
-    "ssh-ed25519",
-    "ssh-rsa",
-    "ecdsa-sha2-nistp256",
-    "ecdsa-sha2-nistp384",
-    "ecdsa-sha2-nistp521",
-})
+HOST_KEY_TYPES = frozenset(
+    {
+        "ssh-ed25519",
+        "ssh-rsa",
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+    }
+)
 MIN_SFTP_REQUEST_SIZE = 4096
 MAX_SFTP_REQUEST_SIZE = 261120  # 262144 breaks OpenSSH
 
@@ -189,7 +191,7 @@ def _shorten(text: str, limit: int = 60) -> str:
 
 def _parse_fingerprint(entry: str) -> str:
     """Normalise ``SHA256:<base64>`` (padding optional) to OpenSSH's unpadded form."""
-    b64 = entry[len(_FINGERPRINT_PREFIX):].rstrip("=")
+    b64 = entry[len(_FINGERPRINT_PREFIX) :].rstrip("=")
     try:
         digest = base64.b64decode(b64 + "=" * (-len(b64) % 4), validate=True)
     except binascii.Error:
@@ -223,8 +225,11 @@ def _parse_public_key(entry: str) -> str:
     except binascii.Error:
         raise ValueError(f"{_shorten(entry)!r}: the key is not valid base64") from None
     encoded_type = key_type.encode()
-    if len(blob) <= 4 + len(encoded_type) or struct.unpack(">I", blob[:4])[0] != len(encoded_type) \
-            or blob[4:4 + len(encoded_type)] != encoded_type:
+    if (
+        len(blob) <= 4 + len(encoded_type)
+        or struct.unpack(">I", blob[:4])[0] != len(encoded_type)
+        or blob[4 : 4 + len(encoded_type)] != encoded_type
+    ):
         raise ValueError(f"{_shorten(entry)!r}: the key data does not contain a {key_type} key")
     return f"{key_type} {b64}"
 
@@ -252,8 +257,8 @@ def parse_host_keys(raw: str) -> tuple[str, ...]:
     """
     entries: list[str] = []
     problems: list[str] = []
-    for line in raw.splitlines():
-        line = line.strip()
+    for raw_line in raw.splitlines():
+        line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         pending_hosts: list[str] = []
@@ -331,8 +336,9 @@ class _EnvReader:
             self.problems.extend(exc.problems)
             return default
 
-    def optional_integer(self, name: str, minimum: int, maximum: int | None = None,
-                         problems: list[str] | None = None) -> int | None:
+    def optional_integer(
+        self, name: str, minimum: int, maximum: int | None = None, problems: list[str] | None = None
+    ) -> int | None:
         """Integer within [minimum, maximum], None when unset or invalid.
 
         A problem goes to ``problems`` (default: self.problems).
@@ -343,14 +349,13 @@ class _EnvReader:
         value = int(raw) if _INT_RE.fullmatch(raw) else None
         if value is None or value < minimum or (maximum is not None and value > maximum):
             limits = f"between {minimum} and {maximum}" if maximum is not None else f">= {minimum}"
-            (self.problems if problems is None else problems).append(
-                f"{name} must be an integer {limits}, got {raw!r}"
-            )
+            (self.problems if problems is None else problems).append(f"{name} must be an integer {limits}, got {raw!r}")
             return None
         return value
 
-    def integer(self, name: str, default: int, minimum: int, maximum: int | None = None,
-                problems: list[str] | None = None) -> int:
+    def integer(
+        self, name: str, default: int, minimum: int, maximum: int | None = None, problems: list[str] | None = None
+    ) -> int:
         """Like optional_integer(), but ``default`` when unset or invalid."""
         value = self.optional_integer(name, minimum, maximum, problems)
         return default if value is None else value
@@ -407,13 +412,16 @@ def _load_every_hour(reader: _EnvReader) -> int | None:
         logger.warning(
             "BACKUP_EVERY_HOUR=%d does not divide 24: %d backups per day, the gap before the "
             "first backup of the next day is %d h",
-            every, slots, 24 - every * (slots - 1),
+            every,
+            slots,
+            24 - every * (slots - 1),
         )
     return every
 
 
-def _load_retention(reader: _EnvReader, backup_time: datetime.time,
-                    every_hour: int | None) -> tuple[RetentionPolicy | None, tuple[str, ...]]:
+def _load_retention(
+    reader: _EnvReader, backup_time: datetime.time, every_hour: int | None
+) -> tuple[RetentionPolicy | None, tuple[str, ...]]:
     """Build the retention policy; problems disable retention instead of failing the config."""
     errors: list[str] = []
     hourly_keep = reader.integer("HOURLY_BACKUP_KEEP", 4, 0, problems=errors)
@@ -445,8 +453,11 @@ def _load_sftp_endpoint(reader: _EnvReader) -> tuple[str, int]:
         return host, port
     if host.count(":") == 1:  # IPv6 literals contain several colons and are left alone
         legacy_host, legacy_port_raw = host.split(":")
-        if not legacy_host or not re.fullmatch(r"[0-9]+", legacy_port_raw, re.ASCII) \
-                or not 1 <= int(legacy_port_raw) <= 65535:
+        if (
+            not legacy_host
+            or not re.fullmatch(r"[0-9]+", legacy_port_raw, re.ASCII)
+            or not 1 <= int(legacy_port_raw) <= 65535
+        ):
             reader.problems.append(f"SFTP_HOST: {host!r} is not a host name (set the port with SFTP_PORT)")
             return host, port
         legacy_port = int(legacy_port_raw)
@@ -457,7 +468,9 @@ def _load_sftp_endpoint(reader: _EnvReader) -> tuple[str, int]:
             return host, port
         logger.warning(
             "SFTP_HOST=%r with a port is deprecated: use SFTP_HOST=%r and SFTP_PORT=%d",
-            host, legacy_host, legacy_port,
+            host,
+            legacy_host,
+            legacy_port,
         )
         return legacy_host, legacy_port
     if any(ch.isspace() or ch in "/@" for ch in host):
@@ -537,7 +550,7 @@ def _load_timezone(reader: _EnvReader) -> tuple[str, zoneinfo.ZoneInfo]:
     name = (reader.raw("TZ") or "UTC").removeprefix(":")  # glibc accepts TZ=":Europe/Zurich"
     try:
         return name, zoneinfo.ZoneInfo(name)
-    except (zoneinfo.ZoneInfoNotFoundError, ValueError, OSError):
+    except zoneinfo.ZoneInfoNotFoundError, ValueError, OSError:
         reader.problems.append(f"TZ: unknown time zone {name!r}")
         return name, zoneinfo.ZoneInfo("UTC")
 
@@ -562,8 +575,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         problems.append("ODOO_MASTER_PWD or ODOO_MASTER_PWD_FILE is required")
     db_name = reader.required("ODOO_DB_NAME")
     if db_name and not DB_NAME_PATTERN.fullmatch(db_name):
-        problems.append(f"ODOO_DB_NAME: {db_name!r} is not a valid Odoo database name "
-                        f"(^{DB_NAME_PATTERN.pattern}$)")
+        problems.append(f"ODOO_DB_NAME: {db_name!r} is not a valid Odoo database name (^{DB_NAME_PATTERN.pattern}$)")
     backup_format = (reader.raw("ODOO_BACKUP_FORMAT") or "zip").lower()
     if backup_format not in ALLOWED_FORMATS:
         problems.append(f"ODOO_BACKUP_FORMAT must be one of {', '.join(ALLOWED_FORMATS)}, got {backup_format!r}")

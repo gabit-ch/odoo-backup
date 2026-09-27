@@ -127,7 +127,10 @@ class RetentionPolicy:
             raise ValueError(f"anchor must be a naive datetime.time, got {self.anchor!r}")
 
     def describe(self) -> str:
-        """Human readable one-liner for log lines, e.g. "last 12, daily 30, monthly 12, yearly all (anchor 01:00:00)"."""
+        """Human readable one-liner for log lines.
+
+        E.g. "last 12, daily 30, monthly 12, yearly all (anchor 01:00:00)".
+        """
         yearly = "all" if self.keep_yearly == -1 else str(self.keep_yearly)
         return (
             f"last {self.keep_last}, daily {self.keep_daily}, monthly {self.keep_monthly}, "
@@ -159,8 +162,7 @@ class RetentionPlan:
     def summary(self) -> str:
         """E.g. "keep 54 [hourly 12, daily 30, monthly 12, yearly 3], delete 936, ignored 3, future 0"."""
         rules = ", ".join(
-            f"{reason} {self.count(reason)}"
-            for reason in (REASON_HOURLY, REASON_DAILY, REASON_MONTHLY, REASON_YEARLY)
+            f"{reason} {self.count(reason)}" for reason in (REASON_HOURLY, REASON_DAILY, REASON_MONTHLY, REASON_YEARLY)
         )
         return (
             f"keep {len(self.keep)} [{rules}], delete {len(self.delete)}, "
@@ -270,7 +272,7 @@ def plan_retention(
     if eligible:
         reasons[eligible[-1].name].add(REASON_NEWEST)
     if policy.keep_last:
-        for backup in eligible[-policy.keep_last:]:
+        for backup in eligible[-policy.keep_last :]:
             reasons[backup.name].add(REASON_HOURLY)
 
     daily = _daily_representatives(eligible, policy.anchor)
@@ -288,9 +290,7 @@ def plan_retention(
     return RetentionPlan(
         keep=MappingProxyType(keep),
         delete=tuple(b for b in eligible if b.name not in keep),
-        stale_partials=tuple(
-            p for p in partials if cutoff is not None and p.ts < cutoff and p.name not in protected
-        ),
+        stale_partials=tuple(p for p in partials if cutoff is not None and p.ts < cutoff and p.name not in protected),
         ignored=ignored,
         future=future,
     )

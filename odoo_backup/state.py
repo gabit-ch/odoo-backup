@@ -66,7 +66,7 @@ class State:
         }
 
     @classmethod
-    def from_json(cls, data: object) -> "State":
+    def from_json(cls, data: object) -> State:
         """Build a State from parsed JSON; raises ValueError for anything malformed."""
         if not isinstance(data, dict):
             raise ValueError("the state file does not contain a JSON object")
@@ -214,9 +214,7 @@ def _format_age(delta: datetime.timedelta) -> str:
     return f"{minutes}m"
 
 
-def full_backup_problem(
-    state: State, now: datetime.datetime, max_age: datetime.timedelta
-) -> str | None:
+def full_backup_problem(state: State, now: datetime.datetime, max_age: datetime.timedelta) -> str | None:
     """Why the full backups (database + filestore) are overdue, or None while they are fresh.
 
     Needed when database-only backups run between the daily full backups: they keep the last
@@ -289,9 +287,10 @@ def send_heartbeat(url: str, timeout: float = HEARTBEAT_TIMEOUT) -> bool:
     urllib is used instead of requests so no library debug logging can print it either.
     Failures are logged as WARNING and never raise.
     """
-    request = urllib.request.Request(url, method="GET", headers={"User-Agent": f"odoo-backup/{__version__}"})
+    # S310: load_config() only accepts http:// and https:// heartbeat URLs (_EnvReader.http_url()).
+    request = urllib.request.Request(url, method="GET", headers={"User-Agent": f"odoo-backup/{__version__}"})  # noqa: S310
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             status = response.status
     except urllib.error.HTTPError as exc:
         status = exc.code

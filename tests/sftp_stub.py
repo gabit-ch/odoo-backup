@@ -40,6 +40,7 @@ real server: relative to the root, ``..`` and doubled slashes collapsed, symlink
 The password is never recorded; ``auth_attempts`` only stores method, user name and outcome.
 """
 
+import contextlib
 import hmac
 import io
 import logging
@@ -165,13 +166,13 @@ class SFTPStubServer:
 
     # -- lifecycle -------------------------------------------------------------------------
 
-    def __enter__(self) -> "SFTPStubServer":
+    def __enter__(self) -> SFTPStubServer:
         return self.start()
 
     def __exit__(self, *exc_info: object) -> None:
         self.stop()
 
-    def start(self) -> "SFTPStubServer":
+    def start(self) -> SFTPStubServer:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind((HOST, 0))
         listener.listen(16)
@@ -196,10 +197,8 @@ class SFTPStubServer:
         with self._lock:
             files, self._open_files = self._open_files, []
         for fileobj in files:
-            try:
+            with contextlib.suppress(OSError, ValueError):
                 fileobj.close()
-            except (OSError, ValueError):
-                pass
 
     def disconnect_all(self) -> None:
         """Close every open connection from the server side (simulates a network drop)."""
@@ -278,7 +277,7 @@ class SFTPStubServer:
             return list(self._writes)
 
     @property
-    def connections(self) -> list["_StubConnection"]:
+    def connections(self) -> list[_StubConnection]:
         with self._lock:
             return list(self._connections)
 
@@ -318,20 +317,18 @@ class SFTPStubServer:
             transport.set_subsystem_handler("sftp", _StubSFTPServer, _StubSFTPInterface, connection)
         try:
             transport.start_server(event=threading.Event(), server=_StubServerInterface(self))
-        except (paramiko.SSHException, OSError, EOFError):
+        except paramiko.SSHException, OSError, EOFError:
             connection.close()
 
     def _record_auth(self, method: str, username: str, accepted: bool) -> None:
         with self._lock:
             self._auth_attempts.append(AuthAttempt(method, username, accepted))
 
-    def _record_open(self, connection: "_StubConnection", path: str, flags: int) -> None:
+    def _record_open(self, connection: _StubConnection, path: str, flags: int) -> None:
         with self._lock:
             self._opens.append(OpenRequest(connection.number, path, flags))
 
-    def _record_write(
-        self, connection: "_StubConnection", path: str, offset: int, length: int, failed: bool
-    ) -> None:
+    def _record_write(self, connection: _StubConnection, path: str, offset: int, length: int, failed: bool) -> None:
         with self._lock:
             self._writes.append(WriteRequest(connection.number, path, offset, length, failed))
 
@@ -400,11 +397,7 @@ class _StubServerInterface(paramiko.ServerInterface):
 
     def check_auth_password(self, username: str, password: str) -> int:
         stub = self._stub
-        accepted = (
-            "password" in stub.auth_methods
-            and _same(username, stub.username)
-            and _same(password, stub.password)
-        )
+        accepted = "password" in stub.auth_methods and _same(username, stub.username) and _same(password, stub.password)
         stub._record_auth("password", username, accepted)
         return paramiko.AUTH_SUCCESSFUL if accepted else paramiko.AUTH_FAILED
 
@@ -437,8 +430,9 @@ class _StubServerInterface(paramiko.ServerInterface):
 class _StalledSubsystem(paramiko.SubsystemHandler):
     """Accepts the ``sftp`` subsystem but never sends the SFTP VERSION packet."""
 
-    def __init__(self, channel: paramiko.Channel, name: str, server: paramiko.ServerInterface,
-                 stopping: threading.Event) -> None:
+    def __init__(
+        self, channel: paramiko.Channel, name: str, server: paramiko.ServerInterface, stopping: threading.Event
+    ) -> None:
         super().__init__(channel, name, server)
         self._stopping = stopping
 

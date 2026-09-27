@@ -192,7 +192,7 @@ class Watchdog:
         self.fired = threading.Event()
         self._timer: threading.Timer | None = None
 
-    def __enter__(self) -> "Watchdog":
+    def __enter__(self) -> Watchdog:
         self._timer = threading.Timer(self.seconds, self._fire)
         self._timer.name = "odoo-backup-watchdog"
         self._timer.daemon = True
@@ -209,7 +209,9 @@ class Watchdog:
         self.fired.set()
         logger.critical(
             "%s did not finish within %s; terminating the process with exit code %d",
-            self.what, datetime.timedelta(seconds=round(self.seconds)), self.exit_code,
+            self.what,
+            datetime.timedelta(seconds=round(self.seconds)),
+            self.exit_code,
         )
         if self.on_timeout is not None:
             with contextlib.suppress(Exception):
@@ -306,8 +308,7 @@ def plan_directories(
             entry.skipped = "the directory does not exist"
         elif entry.policy is None:
             entry.skipped = (
-                "database-only backups are never deleted in daily mode (they only come from "
-                "--once --database-only)"
+                "database-only backups are never deleted in daily mode (they only come from --once --database-only)"
             )
         else:
             names = [remote.name for remote in sftp.list_files(entry.directory)]
@@ -317,15 +318,17 @@ def plan_directories(
 
 def log_directory_plan(entry: DirectoryRetention, db_name: str) -> None:
     """Log the plan of one directory: summary INFO, names DEBUG, future files WARNING."""
-    if entry.plan is None:
+    plan, policy = entry.plan, entry.policy
+    if plan is None or policy is None:  # plan_directories() only plans with a policy
         level = logging.DEBUG if entry.skipped == "the directory does not exist" else logging.INFO
         logger.log(level, "Retention for %s (%s backups) skipped: %s", entry.directory, entry.kind, entry.skipped)
         return
-    plan = entry.plan
-    assert entry.policy is not None
     logger.info(
         "Retention for %s (%s backups; %s): %s",
-        entry.directory, entry.kind, entry.policy.describe(), plan.summary(),
+        entry.directory,
+        entry.kind,
+        policy.describe(),
+        plan.summary(),
     )
     for name, reasons in plan.keep.items():
         logger.debug("Retention: keep %s (%s)", name, ", ".join(sorted(reasons)))
@@ -335,12 +338,16 @@ def log_directory_plan(entry: DirectoryRetention, db_name: str) -> None:
         logger.warning(
             "Retention: %d backup(s) in %s are dated more than a day in the future and are kept "
             "(clock or TZ changed?): %s",
-            len(plan.future), entry.directory, ", ".join(backup.name for backup in plan.future[:10]),
+            len(plan.future),
+            entry.directory,
+            ", ".join(backup.name for backup in plan.future[:10]),
         )
     if plan.ignored:
         logger.info(
             "Retention: %d file(s) in %s are not backups of database %r and are ignored",
-            plan.ignored, entry.directory, db_name,
+            plan.ignored,
+            entry.directory,
+            db_name,
         )
 
 
@@ -354,7 +361,9 @@ def apply_retention(sftp: SFTPConnection, entry: DirectoryRetention, *, dry_run:
         more = len(names) - DRY_RUN_LIST_LIMIT
         logger.warning(
             "RETENTION_DRY_RUN: would delete %d backup(s) from %s: %s%s",
-            len(names), entry.directory, ", ".join(names[:DRY_RUN_LIST_LIMIT]),
+            len(names),
+            entry.directory,
+            ", ".join(names[:DRY_RUN_LIST_LIMIT]),
             f" and {more} more" if more > 0 else "",
         )
         return
@@ -371,7 +380,9 @@ def apply_retention(sftp: SFTPConnection, entry: DirectoryRetention, *, dry_run:
                 entry.aborted = True
                 logger.warning(
                     "Retention in %s aborted after %d failed deletions in a row (%d not attempted)",
-                    entry.directory, consecutive, len(names) - index - 1,
+                    entry.directory,
+                    consecutive,
+                    len(names) - index - 1,
                 )
                 return
             continue
@@ -494,8 +505,14 @@ class _BackupRun:
         result, config = self.result, self.config
         logger.info(
             "backup started: run_id=%s kind=%s db=%s format=%s target=%s@%s:%d:%s",
-            result.run_id, result.kind, config.odoo_db_name, config.backup_format,
-            config.sftp_user, config.sftp_host, config.sftp_port, self.target_dir,
+            result.run_id,
+            result.kind,
+            config.odoo_db_name,
+            config.backup_format,
+            config.sftp_user,
+            config.sftp_host,
+            config.sftp_port,
+            self.target_dir,
         )
         try:
             try:
@@ -537,14 +554,14 @@ class _BackupRun:
                 odoo = self.odoo_factory(self.config)
             with odoo:
                 with self._stage(STAGE_ODOO):
-                    self._prepare_file_name(odoo)
+                    file_name = self._prepare_file_name(odoo)
                 with self._stage(STAGE_DOWNLOAD):
-                    self._download(odoo)
+                    local_path = self._download(odoo, file_name)
             with contextlib.ExitStack() as stack:
                 with self._stage(STAGE_UPLOAD):
                     sftp = self.sftp_factory(self.config)
                     stack.enter_context(sftp)  # connects
-                    upload = self._upload(sftp)
+                    upload = self._upload(sftp, local_path, file_name)
                 with self._stage(STAGE_CLOCK_CHECK):
                     self._check_clock(upload)
                 with self._stage(STAGE_RETENTION):
@@ -614,27 +631,25 @@ class _BackupRun:
                 f"{self.result.kind} backup has {_format_bytes(newest_size)} (need {_format_bytes(needed)})"
             )
 
-    def _prepare_file_name(self, odoo: OdooClient) -> None:
+    def _prepare_file_name(self, odoo: OdooClient) -> str:
         config = self.config
         serie = odoo.server_serie()
-        self.result.file_name = build_file_name(
-            serie, config.odoo_db_name, self.start.replace(tzinfo=None), config.backup_format
-        )
+        file_name = build_file_name(serie, config.odoo_db_name, self.start.replace(tzinfo=None), config.backup_format)
+        self.result.file_name = file_name
+        return file_name
 
-    def _download(self, odoo: OdooClient) -> None:
-        assert self.result.file_name is not None
-        self.local_path = self.config.tmp_dir / (self.result.file_name + ".part")
-        download = odoo.download_backup(self.config.backup_format, self.local_path, with_filestore=self.full)
+    def _download(self, odoo: OdooClient, file_name: str) -> pathlib.Path:
+        local_path = self.config.tmp_dir / (file_name + ".part")
+        self.local_path = local_path  # removed by _remove_local_file(), whatever happens
+        download = odoo.download_backup(self.config.backup_format, local_path, with_filestore=self.full)
         self.result.size = download.size
         self.result.sha256 = download.sha256
         self.result.download_seconds = download.seconds
+        return local_path
 
-    def _upload(self, sftp: SFTPConnection) -> UploadResult:
-        assert self.local_path is not None and self.result.file_name is not None
+    def _upload(self, sftp: SFTPConnection, local_path: pathlib.Path, file_name: str) -> UploadResult:
         try:
-            upload = sftp.upload(
-                self.local_path, self.target_dir, self.result.file_name, attempts=self.config.sftp_upload_attempts
-            )
+            upload = sftp.upload(local_path, self.target_dir, file_name, attempts=self.config.sftp_upload_attempts)
         finally:
             self._remove_local_file()
         self.result.remote_path = upload.remote_path
@@ -701,13 +716,23 @@ class _BackupRun:
             logger.info(
                 "backup finished: run_id=%s kind=%s file=%s bytes=%d download_s=%.1f upload_s=%.1f "
                 "retention=%s total_s=%.1f",
-                result.run_id, result.kind, result.file_name, result.size or 0, result.download_seconds or 0.0,
-                result.upload_seconds or 0.0, result.retention, result.total_seconds,
+                result.run_id,
+                result.kind,
+                result.file_name,
+                result.size or 0,
+                result.download_seconds or 0.0,
+                result.upload_seconds or 0.0,
+                result.retention,
+                result.total_seconds,
             )
         else:
             logger.error(
                 "backup failed: run_id=%s kind=%s stage=%s error=%s file=%s total_s=%.1f",
-                result.run_id, result.kind, result.stage, result.error, result.file_name or "-",
+                result.run_id,
+                result.kind,
+                result.stage,
+                result.error,
+                result.file_name or "-",
                 result.total_seconds,
                 exc_info=self.unexpected,
             )
@@ -719,8 +744,7 @@ class _BackupRun:
         result = self.result
         now = self.clock()
         try:
-            if result.ok:
-                assert result.file_name is not None
+            if result.ok and result.file_name is not None:  # a successful run always has a file name
                 return self.state.record_success(now, result.file_name, full=self.full)
             return self.state.record_failure(
                 now, f"{result.kind} backup failed at stage {result.stage}: {result.error}"

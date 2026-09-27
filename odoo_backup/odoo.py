@@ -71,8 +71,7 @@ _UNAVAILABLE_STATUSES = frozenset({403, 404, 405, 410, 501})
 # which retention parses: it must not contain '-' or '/'.
 _SERIE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.~_+]*")
 _ACCESS_DENIED_HINT = (
-    "check ODOO_MASTER_PWD; Odoo also answers Access Denied when its database manager is disabled "
-    "(list_db = False)"
+    "check ODOO_MASTER_PWD; Odoo also answers Access Denied when its database manager is disabled (list_db = False)"
 )
 
 
@@ -161,7 +160,10 @@ class _ProgressLogger:
             return
         logger.info(
             "%s: %d bytes (%.2f GiB) received, %.1f MB/s",
-            self._label, total, total / 2**30, _mb_per_second(total, now - self._start),
+            self._label,
+            total,
+            total / 2**30,
+            _mb_per_second(total, now - self._start),
         )
         self._last = now
         while self._next_bytes <= total:
@@ -211,7 +213,7 @@ class OdooClient:
         if self._owns_session:
             self._session.close()
 
-    def __enter__(self) -> "OdooClient":
+    def __enter__(self) -> OdooClient:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
@@ -231,7 +233,9 @@ class OdooClient:
         except OdooError as exc:
             logger.warning(
                 "Reading the Odoo version from %s failed (%s); falling back to XML-RPC %s",
-                VERSION_INFO_PATH, exc, XMLRPC_COMMON_PATH,
+                VERSION_INFO_PATH,
+                exc,
+                XMLRPC_COMMON_PATH,
             )
             serie = self._xmlrpc_server_serie()
         if not isinstance(serie, str) or not _SERIE_RE.fullmatch(serie):
@@ -342,8 +346,16 @@ class OdooClient:
         logger.info(
             "Downloaded %s %s backup %s: %d bytes (%.2f GiB) in %.1f s (%.1f MB/s), sha256=%s, "
             "members=%s, filestore=%s",
-            kind, fmt, dest.name, size, size / 2**30, seconds, _mb_per_second(size, seconds), sha256,
-            members, filestore,
+            kind,
+            fmt,
+            dest.name,
+            size,
+            size / 2**30,
+            seconds,
+            _mb_per_second(size, seconds),
+            sha256,
+            members,
+            filestore,
         )
         for note in verification.notes:
             logger.warning("Backup verification: %s", note)
@@ -365,9 +377,7 @@ class OdooClient:
         fmt: str,
         progress: Callable[[int], None] | None,
     ) -> tuple[int, str, float]:
-        logger.info(
-            "Requesting a %s %s backup of database %r from %s", kind, fmt, self.db_name, self.display_url
-        )
+        logger.info("Requesting a %s %s backup of database %r from %s", kind, fmt, self.db_name, self.display_url)
         started = time.monotonic()
         response = self._post(
             BACKUP_PATH,
@@ -384,7 +394,8 @@ class OdooClient:
             expected_size = self._expected_size(response)
             logger.info(
                 "Odoo started sending the backup after %.1f s; writing it to %s",
-                time.monotonic() - started, dest,
+                time.monotonic() - started,
+                dest,
             )
             reporter = _ProgressLogger(f"Downloading {dest.name}")
             try:
@@ -450,7 +461,7 @@ class OdooClient:
                 yield chunk
                 continue
             pending.append(chunk)
-            head += chunk[:HEAD_SIZE - len(head)]
+            head += chunk[: HEAD_SIZE - len(head)]
             if len(head) < HEAD_SIZE:
                 continue
             self._check_backup_head(bytes(head), pending, fmt)
