@@ -38,6 +38,13 @@ jobs:
           languages: python
           build-mode: none
           queries: security-extended
+          # Analyse the shipped code only. The test stubs and the end-to-end harness deliberately
+          # handle generated throwaway credentials in clear text (odoo.conf and the SFTP users file
+          # read by the test containers, ::add-mask:: lines for GitHub's log masking); ruff's
+          # flake8-bandit rules still check tests/.
+          config: |
+            paths-ignore:
+              - tests
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2

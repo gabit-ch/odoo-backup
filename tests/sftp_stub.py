@@ -538,7 +538,7 @@ class _StubSFTPInterface(paramiko.SFTPServerInterface):
     def open(self, path: str, flags: int, attr: paramiko.SFTPAttributes) -> paramiko.SFTPHandle | int:
         self._stub._record_open(self._connection, path, flags)
         try:
-            fd = os.open(self._stub.local_path(path), flags, 0o644)
+            fd = os.open(self._stub.local_path(path), flags, 0o600)
         except OSError as exc:
             return paramiko.SFTPServer.convert_errno(exc.errno)
         access = flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR)
