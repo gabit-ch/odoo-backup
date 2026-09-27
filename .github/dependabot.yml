@@ -1,0 +1,51 @@
+version: 2
+updates:
+  # requirements.txt (runtime) and requirements-dev.txt (ruff, coverage, pip-audit) pin their
+  # complete closures; review that the "# via" comments still hold.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7 # security updates are not delayed
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  # The python:3.14-alpine3.24 base image is pinned by digest in the Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      docker-base-image:
+        patterns: ["*"]
+
+  # PostgreSQL, Odoo and SFTP images of the end-to-end test, pinned by digest.
+  - package-ecosystem: "docker-compose"
+    directory: "/tests/e2e"
+    schedule:
+      interval: "weekly"
+    ignore:
+      # Major versions are bumped by hand, together: the PostgreSQL server must not be newer than
+      # the pg_dump client in the Odoo image, and the test targets Odoo 19.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "odoo"
+        update-types: ["version-update:semver-major"]
+    groups:
+      e2e-images:
+        patterns: ["*"]
+
+  # The workflows pin every action to a commit SHA with a "# vX.Y.Z" comment. Updated by hand:
+  # the tool binaries in ci.yml (actionlint, hadolint, shellcheck, grype; pinned by SHA-256) and
+  # the BuildKit and binfmt images (BUILDKIT_IMAGE, BINFMT_IMAGE; pinned by digest).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
