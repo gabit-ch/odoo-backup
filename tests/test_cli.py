@@ -158,7 +158,7 @@ class CheckTests(CliTestCase):
         self.assertEqual([p.name for p in self.sftp_root.rglob("*") if p.is_file()], [])  # probes removed
         self.assertEqual(self.odoo.requests_to(BACKUP_PATH), [])  # no backup was taken
         for line in lines:
-            self.assertIn(line, self.messages())  # logged as well
+            self.assertNotIn(line, self.messages())  # stdout is the report; the line is not logged again
         for secret in self.secrets:
             self.assertNotIn(secret, output)
 
@@ -636,6 +636,37 @@ class ServiceHelperTests(CliTestCase):
                 logging.getLogger(name).setLevel(level)
             logging.captureWarnings(False)
 
+    def test_setup_logging_default_level_yields_to_log_level(self) -> None:
+        root = logging.getLogger()
+        saved_handlers, saved_level = root.handlers[:], root.level
+        saved_library = {name: logging.getLogger(name).level for name in ("paramiko", "urllib3")}
+        cases = (
+            ({}, logging.WARNING, logging.WARNING),
+            ({"LOG_LEVEL": "info"}, logging.WARNING, logging.INFO),
+            ({"LOG_LEVEL": "loud"}, logging.WARNING, logging.WARNING),
+            ({}, logging.INFO, logging.INFO),
+        )
+        try:
+            for env, default_level, expected in cases:
+                with self.subTest(env=env, default_level=default_level):
+                    root.handlers = []
+                    with warnings.catch_warnings():
+                        if env.get("LOG_LEVEL") == "loud":
+                            with self.assertLogs("odoo_backup.cli", logging.WARNING) as logs:
+                                setup_logging(env, default_level=default_level)
+                            self.assertIn("is not a logging level; using WARNING", logs.output[0])
+                        else:
+                            setup_logging(env, default_level=default_level)
+                    self.assertEqual(root.level, expected)
+                    for handler in root.handlers:
+                        handler.close()
+        finally:
+            root.handlers = saved_handlers
+            root.setLevel(saved_level)
+            for name, level in saved_library.items():
+                logging.getLogger(name).setLevel(level)
+            logging.captureWarnings(False)
+
     def test_readme_documents_exactly_the_environment_variables(self) -> None:
         readme = REPO / "README.md"
         if not readme.exists():
@@ -744,11 +775,40 @@ class ProcessTests(CliTestCase):
         self.assertNotIn("Traceback", completed.stderr)
         for secret in self.secrets:
             self.assertNotIn(secret, completed.stdout + completed.stderr)
+        # Every result once, on stdout only; the report commands log no INFO lines by default.
+        self.assert_each_line_once(completed)
+        self.assertNotIn(" INFO ", completed.stderr)
+        self.assertNotIn("OK ", completed.stderr)
 
     def test_check_failure_exit_code(self) -> None:
         completed = self.run_process(["--check"], self.process_env(ODOO_MASTER_PWD=WRONG_MASTER))
         self.assertEqual(completed.returncode, 1)
         self.assertIn("FAIL master-password:", completed.stdout)
+        self.assertEqual((completed.stdout + completed.stderr).count("FAIL master-password:"), 1)
+
+    def assert_each_line_once(self, completed: subprocess.CompletedProcess) -> None:
+        combined = completed.stdout + completed.stderr
+        for line in completed.stdout.splitlines():
+            self.assertEqual(combined.count(line), 1, f"{line!r} appears more than once:\n{combined}")
+
+    def test_check_with_log_level_info_shows_details_but_each_result_once(self) -> None:
+        completed = self.run_process(["--check"], self.process_env(LOG_LEVEL="INFO"))
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("INFO odoo_backup.sftp: Connected to SFTP server", completed.stderr)
+        self.assert_each_line_once(completed)
+        self.assertNotIn("OK ", completed.stderr)
+
+    def test_check_invalid_configuration_prints_each_problem_once(self) -> None:
+        completed = self.run_process(["--check"], self.process_env(SFTP_HOST=None))
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertIn("FAIL config: SFTP_HOST is required", completed.stdout)
+        self.assert_each_line_once(completed)
+
+    def test_retention_plan_prints_the_plan_without_info_logs(self) -> None:
+        completed = self.run_process(["--retention-plan"], self.process_env())
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertEqual(completed.stdout.splitlines()[-1], "Nothing was deleted (retention plan only).")
+        self.assertNotIn(" INFO ", completed.stderr)
 
     def test_importing_has_no_side_effects(self) -> None:
         sentinel = self.base / "sentinel.txt"

@@ -117,15 +117,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def setup_logging(env: Mapping[str, str], *, quiet: bool = False) -> None:
-    """Configure the root logger (LOG_LEVEL, default INFO); ``quiet`` shows errors only.
+def setup_logging(env: Mapping[str, str], *, quiet: bool = False, default_level: int = logging.INFO) -> None:
+    """Configure the root logger: LOG_LEVEL when set, else ``default_level``; ``quiet`` shows errors only.
 
-    Does nothing to the root handlers when they are already configured (e.g. by a test runner).
+    The report commands (--check, --retention-plan) print their result on stdout and pass
+    ``default_level=WARNING``, so the report is not interleaved with INFO logs on stderr; an
+    explicit LOG_LEVEL still wins. Does nothing to the root handlers when they are already
+    configured (e.g. by a test runner).
     """
     raw = (env.get("LOG_LEVEL") or "").strip()
-    level = logging.getLevelNamesMapping().get(raw.upper(), None) if raw else logging.INFO
+    level = logging.getLevelNamesMapping().get(raw.upper(), None) if raw else default_level
     if level is None:
-        level = logging.INFO
+        level = default_level
     if quiet:
         level = max(level, logging.ERROR)
     logging.basicConfig(level=level, format=LOG_FORMAT, stream=sys.stderr)
@@ -133,7 +136,7 @@ def setup_logging(env: Mapping[str, str], *, quiet: bool = False) -> None:
     for name in _QUIET_LIBRARIES:
         logging.getLogger(name).setLevel(max(level, logging.WARNING))
     if raw and raw.upper() not in logging.getLevelNamesMapping():
-        logger.warning("LOG_LEVEL=%r is not a logging level; using INFO", raw)
+        logger.warning("LOG_LEVEL=%r is not a logging level; using %s", raw, logging.getLevelName(default_level))
 
 
 def main(
@@ -149,7 +152,8 @@ def main(
         parser.error("--database-only requires --once")
     environ = os.environ if env is None else env
     if configure_logging:
-        setup_logging(environ, quiet=args.health)
+        report = args.check or args.retention_plan
+        setup_logging(environ, quiet=args.health, default_level=logging.WARNING if report else logging.INFO)
     if args.health:
         return command_health(environ)
     if args.check:
@@ -519,8 +523,8 @@ def command_once(env: Mapping[str, str], full: bool) -> int:
 
 
 def _emit_check(result: CheckResult) -> None:
+    """Print one ``--check`` result; stdout is the report, so the line is not logged again."""
     print(result.line(), flush=True)
-    logger.log(logging.INFO if result.ok else logging.ERROR, "%s", result.line())
 
 
 def _config_line(config: Config) -> str:

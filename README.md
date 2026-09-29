@@ -153,7 +153,7 @@ removed); setting both is an error.
 | `BACKUP_STATE_DIR` | `/tmp/odoo-backup-state` | Holds `state.json` (last success/failure) and the run lock. Must not be inside `BACKUP_TMP_DIR`. |
 | `HEARTBEAT_URL` / `HEARTBEAT_URL_FILE` | unset | `http(s)://` URL requested with GET after every successful run. Treated as a secret. |
 | `HEALTHCHECK_MAX_AGE_HOURS` | interval + max(2, interval // 2) (whole hours) | Age of the last successful backup after which `--health` fails: 36 h in daily mode, 4 h with `BACKUP_EVERY_HOUR=2`. With `HOURLY_BACKUP_FILESTORE=false` the last full backup must also be younger than 36 h (or this value, if larger). |
-| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`. paramiko and urllib3 always log at WARNING or above. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`. Without it, `--check` and `--retention-plan` log only warnings and errors; `--health` always logs errors only. paramiko and urllib3 always log at WARNING or above. |
 
 ## Backup formats
 
@@ -312,6 +312,10 @@ overdue as described above, so the dead-man's switch fires. The URL is never log
 | `python backup.py --retention-plan` | print the retention plan, delete nothing | 0, 1 SFTP error or retention disabled, 2 invalid configuration |
 | `python backup.py --health` | Docker health check | 0 healthy, 1 unhealthy |
 
+`--check` and `--retention-plan` print their result on stdout (one line per check for `--check`) and
+log only warnings and errors on stderr unless `LOG_LEVEL` is set (`LOG_LEVEL=INFO` shows the details);
+`--health` prints its status line and logs errors only.
+
 SIGTERM (e.g. `docker stop`) while idle stops the service at once; during a run it interrupts
 the run, removes the local temporary file, records the run as failed ("interrupted") and exits 0
 (`--once` exits 1).
@@ -437,6 +441,10 @@ by hand in `ci.yml`: the checksums of the tool binaries (actionlint, hadolint, s
 and the digests of the BuildKit and binfmt (QEMU) images used by the image builds.
 
 ## Releases
+
+### 2.0.1
+* `--check` prints every result once; `--check` and `--retention-plan` log only warnings and errors unless
+  `LOG_LEVEL` is set
 
 ### 2.0.0
 * Rewrite as the `odoo_backup` package; `backup.py` is a thin entry point
