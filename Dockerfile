@@ -1,7 +1,7 @@
 # python:3.14-alpine3.24, multi-arch index digest resolved from Docker Hub on 2026-09-27
 # (Python 3.14.7; the base image already contains tzdata and ca-certificates).
 # Dependabot updates the digest (see .github/dependabot.yml).
-FROM python:3.14-alpine3.24@sha256:9e9fde4d32eedce0b661d9ab91e826b62dddf28e928c230ec55f1866cac66b01
+FROM python:3.14-alpine3.24@sha256:f6a589d43c42b9e7f7dc67a12d37132491f362859a5d750607710cc56da3bc72
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
