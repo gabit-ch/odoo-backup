@@ -22,7 +22,7 @@ services:
       retries: 60
 
   odoo:
-    image: odoo:19.0-20260908@sha256:144175ec0039d52daff1d79f7e51c9281ca3c98b96c830feb49d09764a9f5d7c
+    image: odoo:19.0-20261015@sha256:076562619a5de059388d9f9d90545cb575799c04869610a5b20839893819b41b
     depends_on:
       db:
         condition: service_healthy
